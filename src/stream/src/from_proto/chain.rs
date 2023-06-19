@@ -170,6 +170,7 @@ impl ExecutorBuilder for ChainExecutorBuilder {
                 .boxed()
             }
             ChainType::ChainUnspecified => unreachable!(),
+            ChainType::ArrangementBackfill => todo!(),
         };
         Ok(executor)
     }
