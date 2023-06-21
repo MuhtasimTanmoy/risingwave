@@ -223,6 +223,7 @@ impl IndexSelectionRule {
             index.index_table.name.clone(),
             false,
             index.index_table.table_desc().into(),
+            index.index_table.into(),
             vec![],
             logical_scan.ctx(),
             false,
@@ -232,6 +233,7 @@ impl IndexSelectionRule {
             index.primary_table.name.clone(),
             false,
             index.primary_table.table_desc().into(),
+            index.primary_table.into(),
             vec![],
             logical_scan.ctx(),
             false,
@@ -331,6 +333,7 @@ impl IndexSelectionRule {
             logical_scan.table_name().to_string(),
             false,
             primary_table_desc.clone().into(),
+            logical_scan.table_catalog().clone().into(),
             vec![],
             logical_scan.ctx(),
             false,
@@ -562,7 +565,9 @@ impl IndexSelectionRule {
                 .iter()
                 .map(|x| x.column_index)
                 .collect_vec(),
+            // TODO: Should these be cloning the underlying rc instead?
             primary_table_desc.clone().into(),
+            logical_scan.table_catalog().clone().into(),
             vec![],
             logical_scan.ctx(),
             Condition {
@@ -605,6 +610,7 @@ impl IndexSelectionRule {
                     .map(|x| x.column_index)
                     .collect_vec(),
                 index.index_table.table_desc().into(),
+                index.index_table.into(),
                 vec![],
                 ctx,
                 new_predicate,
