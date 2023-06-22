@@ -97,6 +97,7 @@ impl LogicalScan {
         self.core.for_system_time_as_of_proctime
     }
 
+    // FIXME(kwannoel): Fetch from `table_catalog` + lazily instantiate?
     /// Get a reference to the logical scan's table desc.
     pub fn table_desc(&self) -> &TableDesc {
         self.core.table_desc.as_ref()
