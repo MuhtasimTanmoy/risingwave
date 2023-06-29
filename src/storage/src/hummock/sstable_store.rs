@@ -662,6 +662,15 @@ impl SstableWriter for BatchUploadWriter {
         Ok(())
     }
 
+    async fn send_block(&mut self, block: Bytes, meta: &BlockMeta) -> HummockResult<()> {
+        self.buf.extend_from_slice(&block);
+        if let CachePolicy::Fill(_) = self.policy {
+            self.block_info
+                .push(Block::decode(block, meta.uncompressed_size as usize)?);
+        }
+        Ok(())
+    }
+
     async fn finish(mut self, meta: SstableMeta) -> HummockResult<Self::Output> {
         fail_point!("data_upload_err");
         let join_handle = tokio::spawn(async move {
@@ -749,6 +758,18 @@ impl SstableWriter for StreamingUploadWriter {
         }
         self.object_uploader
             .write_bytes(block_data)
+            .await
+            .map_err(HummockError::object_io_error)
+    }
+
+    async fn send_block(&mut self, block: Bytes, meta: &BlockMeta) -> HummockResult<()> {
+        self.data_len += block.len();
+        if let CachePolicy::Fill(_) = self.policy {
+            let block = Block::decode(block.clone(), meta.uncompressed_size as usize)?;
+            self.blocks.push(block);
+        }
+        self.object_uploader
+            .write_bytes(block)
             .await
             .map_err(HummockError::object_io_error)
     }
@@ -885,7 +906,7 @@ impl BlockStream {
 
     /// Reads the next block from the stream and returns it. Returns `None` if there are no blocks
     /// left to read.
-    pub async fn next(&mut self) -> HummockResult<Option<Box<Block>>> {
+    pub async fn next(&mut self) -> HummockResult<Option<(Bytes, usize)>> {
         if self.block_idx >= self.block_size_vec.len() {
             return Ok(None);
         }
@@ -909,10 +930,9 @@ impl BlockStream {
             )));
         }
 
-        let boxed_block = Box::new(Block::decode(Bytes::from(buffer), block_full_size)?);
         self.block_idx += 1;
 
-        Ok(Some(boxed_block))
+        Ok(Some((Bytes::from(buffer), block_full_size)))
     }
 }
 

@@ -15,6 +15,7 @@
 mod compaction_executor;
 mod compaction_filter;
 pub mod compaction_utils;
+mod compactor_block_iterator;
 mod compactor_runner;
 mod context;
 mod iterator;

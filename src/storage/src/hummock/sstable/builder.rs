@@ -16,7 +16,7 @@ use std::cmp;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use risingwave_common::catalog::TableId;
 use risingwave_hummock_sdk::key::{user_key, FullKey, MAX_KEY_LEN};
 use risingwave_hummock_sdk::table_stats::{TableStats, TableStatsMap};
@@ -204,6 +204,29 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         is_new_user_key: bool,
     ) -> HummockResult<()> {
         self.add(full_key, value, is_new_user_key).await
+    }
+
+    /// Add kv pair to sstable.
+    pub async fn add_raw_block(
+        &mut self,
+        full_key: FullKey<Vec<u8>>,
+        buf: Bytes,
+        uncompressed_size: usize,
+    ) -> HummockResult<()> {
+        let smallest_key = full_key.encode();
+        self.last_full_key.clear();
+        self.last_full_key.extend_from_slice(&smallest_key);
+        if !self.block_builder.is_empty() {
+            self.build_block().await?;
+        }
+        self.block_metas.push(BlockMeta {
+            offset: self.writer.data_len() as u32,
+            len: buf.len() as u32,
+            smallest_key,
+            uncompressed_size: uncompressed_size as u32,
+        });
+        let block_meta = self.block_metas.last_mut().unwrap();
+        self.writer.send_block(buf, block_meta).await
     }
 
     /// Add kv pair to sstable.

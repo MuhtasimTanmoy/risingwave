@@ -154,7 +154,13 @@ impl SstableStreamIterator {
         self.stats_ptr
             .fetch_add(add as u64, atomic::Ordering::Relaxed);
 
-        result
+        match result? {
+            Some((buffer, uncompressed_capacity)) => {
+                let block = Box::new(Block::decode(buffer, uncompressed_capacity)?);
+                Ok(Some(block))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Moves to the next KV-pair in the table. Assumes that the current position is valid. Even if

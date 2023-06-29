@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use num_integer::Integer;
 use risingwave_common::hash::VirtualNode;
 use risingwave_hummock_sdk::key::{FullKey, UserKey};
@@ -166,6 +167,43 @@ where
         is_new_user_key: bool,
     ) -> HummockResult<()> {
         self.add_full_key(full_key, value, is_new_user_key).await
+    }
+
+    pub async fn add_raw_block(
+        &mut self,
+        buf: Bytes,
+        full_key: FullKey<Vec<u8>>,
+        is_new_user_key: bool,
+        uncompressed_size: usize,
+    ) -> HummockResult<()> {
+        if self
+            .current_builder
+            .as_ref()
+            .map(|builder| is_new_user_key && builder.reach_capacity())
+            .unwrap_or(false)
+        {
+            let monotonic_deletes = self
+                .del_agg
+                .get_tombstone_between(self.last_sealed_key.as_ref(), full_key.user_key.as_ref());
+            self.seal_current(monotonic_deletes).await?;
+            self.last_sealed_key
+                .extend_from_other(&full_key.user_key.as_ref());
+        }
+
+        if self.current_builder.is_none() {
+            if let Some(progress) = &self.task_progress {
+                progress
+                    .num_pending_write_io
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let builder = self.builder_factory.open_builder().await?;
+            self.current_builder = Some(builder);
+        }
+
+        let builder = self.current_builder.as_mut().unwrap();
+        builder
+            .add_raw_block(full_key, buf, uncompressed_size)
+            .await
     }
 
     /// Adds a key-value pair to the underlying builders.
