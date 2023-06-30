@@ -13,26 +13,32 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet, LinkedList};
-use std::future::Future;
+use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{atomic, Arc};
 use std::time::Instant;
 
 use await_tree::InstrumentAwait;
 use bytes::Bytes;
-use risingwave_hummock_sdk::compaction_group::StateTableId;
 use risingwave_hummock_sdk::key::FullKey;
 use risingwave_hummock_sdk::key_range::KeyRange;
-use risingwave_hummock_sdk::{HummockEpoch, KeyComparator};
-use risingwave_pb::hummock::SstableInfo;
+use risingwave_hummock_sdk::HummockEpoch;
+use risingwave_pb::hummock::{CompactTask, SstableInfo};
 
+use crate::filter_key_extractor::FilterKeyExtractorImpl;
 use crate::hummock::compactor::task_progress::TaskProgress;
-use crate::hummock::compactor::TaskConfig;
-use crate::hummock::multi_builder::{CapacitySplitTableBuilder, TableBuilderFactory};
+use crate::hummock::compactor::{CompactorContext, RemoteBuilderFactory, TaskConfig};
+use crate::hummock::multi_builder::{
+    CapacitySplitTableBuilder, SplitTableOutput, TableBuilderFactory,
+};
 use crate::hummock::sstable_store::{BlockStream, SstableStoreRef};
 use crate::hummock::value::HummockValue;
-use crate::hummock::{Block, BlockHolder, BlockIterator, HummockResult, TableHolder};
+use crate::hummock::{
+    Block, BlockHolder, BlockIterator, CachePolicy, CompactionDeleteRanges, CompressionAlgorithm,
+    HummockResult, SstableBuilderOptions, StreamingSstableWriterFactory, TableHolder,
+    Xor8FilterBuilder,
+};
 use crate::monitor::StoreLocalStatistic;
 
 /// Iterates over the KV-pairs of an SST while downloading it.
@@ -44,8 +50,6 @@ pub struct BlockStreamIterator {
 
     /// For key sanity check of divided SST and debugging
     sstable: TableHolder,
-    existing_table_ids: HashSet<StateTableId>,
-    task_progress: Arc<TaskProgress>,
     iter: Option<BlockIterator>,
 }
 
@@ -64,19 +68,11 @@ impl BlockStreamIterator {
 
     /// Initialises a new [`BlockStreamIterator`] which iterates over the given [`BlockStream`].
     /// The iterator reads at most `max_block_count` from the stream.
-    pub fn new(
-        sstable: TableHolder,
-        existing_table_ids: HashSet<StateTableId>,
-        block_stream: BlockStream,
-        stats: &StoreLocalStatistic,
-        task_progress: Arc<TaskProgress>,
-    ) -> Self {
+    pub fn new(sstable: TableHolder, block_stream: BlockStream) -> Self {
         Self {
             block_stream,
             next_block_index: 0,
             sstable,
-            existing_table_ids,
-            task_progress,
             iter: None,
         }
     }
@@ -123,8 +119,6 @@ impl BlockStreamIterator {
 /// Iterates over the KV-pairs of a given list of SSTs. The key-ranges of these SSTs are assumed to
 /// be consecutive and non-overlapping.
 pub struct ConcatSstableIterator {
-    key_range: KeyRange,
-
     /// The iterator of the current table.
     sstable_iter: Option<BlockStreamIterator>,
 
@@ -133,8 +127,6 @@ pub struct ConcatSstableIterator {
 
     /// All non-overlapping tables.
     sstables: Vec<SstableInfo>,
-
-    existing_table_ids: HashSet<StateTableId>,
 
     sstable_store: SstableStoreRef,
 
@@ -147,38 +139,18 @@ impl ConcatSstableIterator {
     /// arranged in ascending order when it serves as a forward iterator,
     /// and arranged in descending order when it serves as a backward iterator.
     pub fn new(
-        existing_table_ids: Vec<StateTableId>,
         sst_infos: Vec<SstableInfo>,
-        key_range: KeyRange,
         sstable_store: SstableStoreRef,
         task_progress: Arc<TaskProgress>,
     ) -> Self {
         Self {
-            key_range,
             sstable_iter: None,
             cur_idx: 0,
             sstables: sst_infos,
-            existing_table_ids: HashSet::from_iter(existing_table_ids),
             sstable_store,
             task_progress,
             stats: StoreLocalStatistic::default(),
         }
-    }
-
-    #[cfg(test)]
-    pub fn for_test(
-        existing_table_ids: Vec<StateTableId>,
-        sst_infos: Vec<SstableInfo>,
-        key_range: KeyRange,
-        sstable_store: SstableStoreRef,
-    ) -> Self {
-        Self::new(
-            existing_table_ids,
-            sst_infos,
-            key_range,
-            sstable_store,
-            Arc::new(TaskProgress::default()),
-        )
     }
 
     pub async fn rewind(&mut self) -> HummockResult<()> {
@@ -186,16 +158,6 @@ impl ConcatSstableIterator {
     }
 
     pub async fn next_sstable(&mut self) -> HummockResult<()> {
-        self.seek_idx(self.cur_idx + 1).await
-    }
-
-    pub async fn next_block(&mut self) -> HummockResult<()> {
-        if let Some(sstable) = self.sstable_iter.as_mut() {
-            sstable.iter.take();
-            if sstable.is_valid() {
-                return Ok(());
-            }
-        }
         self.seek_idx(self.cur_idx + 1).await
     }
 
@@ -227,14 +189,6 @@ impl ConcatSstableIterator {
         self.cur_idx = idx;
         while self.cur_idx < self.sstables.len() {
             let table_info = &self.sstables[self.cur_idx];
-            let found = table_info
-                .table_ids
-                .iter()
-                .any(|table_id| self.existing_table_ids.contains(table_id));
-            if !found {
-                self.cur_idx += 1;
-                continue;
-            }
             let sstable = self
                 .sstable_store
                 .sstable(table_info, &mut self.stats)
@@ -252,13 +206,7 @@ impl ConcatSstableIterator {
             let add = (now.elapsed().as_secs_f64() * 1000.0).ceil();
             stats_ptr.fetch_add(add as u64, atomic::Ordering::Relaxed);
 
-            let sstable_iter = BlockStreamIterator::new(
-                sstable,
-                self.existing_table_ids.clone(),
-                block_stream,
-                &self.stats,
-                self.task_progress.clone(),
-            );
+            let sstable_iter = BlockStreamIterator::new(sstable, block_stream);
             self.sstable_iter = Some(sstable_iter);
             return Ok(());
         }
@@ -266,27 +214,85 @@ impl ConcatSstableIterator {
     }
 }
 
-pub struct CompactorRunner<F: TableBuilderFactory> {
+pub struct CompactorRunner {
     left: Box<ConcatSstableIterator>,
     right: Box<ConcatSstableIterator>,
-    executor: CompactTaskExecutor<F>,
+    executor:
+        CompactTaskExecutor<RemoteBuilderFactory<StreamingSstableWriterFactory, Xor8FilterBuilder>>,
 }
 
-impl<F: TableBuilderFactory> CompactorRunner<F> {
+impl CompactorRunner {
     pub fn new(
-        left: ConcatSstableIterator,
-        right: ConcatSstableIterator,
-        builder: CapacitySplitTableBuilder<F>,
-        task_config: TaskConfig,
+        context: Arc<CompactorContext>,
+        task: CompactTask,
+        del_agg: Arc<CompactionDeleteRanges>,
+        filter_key_extractor: Arc<FilterKeyExtractorImpl>,
+        task_progress: Arc<TaskProgress>,
     ) -> Self {
+        let mut options: SstableBuilderOptions = context.storage_opts.as_ref().into();
+        options.compression_algorithm = match task.compression_algorithm {
+            0 => CompressionAlgorithm::None,
+            1 => CompressionAlgorithm::Lz4,
+            _ => CompressionAlgorithm::Zstd,
+        };
+        options.capacity = task.target_file_size as usize;
+        let get_id_time = Arc::new(AtomicU64::new(0));
+
+        let key_range = KeyRange::inf();
+
+        let task_config = TaskConfig {
+            key_range: key_range.clone(),
+            cache_policy: CachePolicy::NotFill,
+            gc_delete_keys: task.gc_delete_keys,
+            watermark: task.watermark,
+            stats_target_table_ids: Some(HashSet::from_iter(task.existing_table_ids.clone())),
+            task_type: task.task_type(),
+            is_target_l0_or_lbase: task.target_level == 0 || task.target_level == task.base_level,
+            split_by_table: task.split_by_state_table,
+            split_weight_by_vnode: task.split_weight_by_vnode,
+        };
+        let factory = StreamingSstableWriterFactory::new(context.sstable_store.clone());
+        let builder_factory = RemoteBuilderFactory::<_, Xor8FilterBuilder> {
+            sstable_object_id_manager: context.sstable_object_id_manager.clone(),
+            limiter: context.output_memory_limiter.clone(),
+            options,
+            policy: task_config.cache_policy,
+            remote_rpc_cost: get_id_time.clone(),
+            filter_key_extractor,
+            sstable_writer_factory: factory,
+            _phantom: PhantomData,
+        };
+        let sst_builder = CapacitySplitTableBuilder::new(
+            builder_factory,
+            context.compactor_metrics.clone(),
+            Some(task_progress.clone()),
+            del_agg,
+            task_config.key_range.clone(),
+            task_config.is_target_l0_or_lbase,
+            task_config.split_by_table,
+            task_config.split_weight_by_vnode,
+        );
+        let left = Box::new(ConcatSstableIterator::new(
+            task.input_ssts[0].table_infos.clone(),
+            context.sstable_store.clone(),
+            task_progress.clone(),
+        ));
+        let right = Box::new(ConcatSstableIterator::new(
+            task.input_ssts[1].table_infos.clone(),
+            context.sstable_store.clone(),
+            task_progress.clone(),
+        ));
+
         Self {
+            executor: CompactTaskExecutor::new(sst_builder, task_config),
             left,
             right,
-            executor: CompactTaskExecutor::new(builder, task_config),
         }
     }
 
-    pub async fn run(&mut self) -> HummockResult<()> {
+    pub async fn run(mut self) -> HummockResult<Vec<SplitTableOutput>> {
+        self.left.rewind().await?;
+        self.right.rewind().await?;
         while self.left.is_valid() && self.right.is_valid() {
             let ret = self
                 .left
@@ -344,7 +350,7 @@ impl<F: TableBuilderFactory> CompactorRunner<F> {
         }
         if !self.left.is_valid() {
             if !self.right.is_valid() {
-                return Ok(());
+                return self.executor.builder.finish().await;
             }
             std::mem::swap(&mut self.left, &mut self.right);
         }
@@ -360,17 +366,16 @@ impl<F: TableBuilderFactory> CompactorRunner<F> {
         while self.left.is_valid() {
             let sstable_iter = self.left.sstable_iter.as_mut().unwrap();
             while sstable_iter.is_valid() {
-                let full_key =
-                    FullKey::decode(self.left.current_sstable().next_block_smallest()).to_vec();
+                let full_key = FullKey::decode(sstable_iter.next_block_smallest()).to_vec();
                 let (block, uncompressed_size) = sstable_iter.download_next_block().await?.unwrap();
                 self.executor
                     .builder
                     .add_raw_block(block, full_key, false, uncompressed_size)
                     .await?;
             }
-            self.left.next_sstable().await;
+            self.left.next_sstable().await?;
         }
-        Ok(())
+        self.executor.builder.finish().await
     }
 }
 

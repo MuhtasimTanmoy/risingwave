@@ -15,9 +15,9 @@
 mod compaction_executor;
 mod compaction_filter;
 pub mod compaction_utils;
-mod compactor_block_iterator;
 mod compactor_runner;
 mod context;
+mod fast_compactor_runner;
 mod iterator;
 mod shared_buffer_compact;
 pub(super) mod task_progress;
@@ -180,6 +180,7 @@ impl Compactor {
             .collect_vec();
         compact_table_ids.sort();
         compact_table_ids.dedup();
+        let single_table = compact_table_ids.len() == 1;
 
         let existing_table_ids: HashSet<u32> =
             HashSet::from_iter(compact_task.existing_table_ids.clone());
@@ -218,6 +219,15 @@ impl Compactor {
 
         let multi_filter_key_extractor = Arc::new(multi_filter_key_extractor);
 
+        let has_tombstone = compact_task
+            .input_ssts
+            .iter()
+            .flat_map(|level| level.table_infos.iter())
+            .any(|sst| sst.range_tombstone_count > 0);
+        let has_ttl = compact_task
+            .table_options
+            .iter()
+            .any(|(_, table_option)| table_option.retention_seconds > 0);
         let mut task_status = TaskStatus::Success;
         // skip sst related to non-existent able_id to reduce io
         let sstable_infos = compact_task
@@ -236,18 +246,30 @@ impl Compactor {
             .iter()
             .map(|table_info| table_info.file_size)
             .sum::<u64>();
-        match generate_splits(&sstable_infos, compaction_size, context.clone()).await {
-            Ok(splits) => {
-                if !splits.is_empty() {
-                    compact_task.splits = splits;
+        let mut optimize_by_copy_block = false;
+        if !has_tombstone
+            && !has_ttl
+            && single_table
+            && compact_task.target_level > 0
+            && compact_task.input_ssts.len() == 2
+            && !compact_task.input_ssts[1].table_infos.is_empty()
+        {
+            optimize_by_copy_block = true;
+        } else {
+            match generate_splits(&sstable_infos, compaction_size, context.clone()).await {
+                Ok(splits) => {
+                    if !splits.is_empty() {
+                        compact_task.splits = splits;
+                    }
                 }
-            }
 
-            Err(e) => {
-                tracing::warn!("Failed to generate_splits {:#?}", e);
-                task_status = TaskStatus::ExecuteFailed;
-                Self::compact_done(&mut compact_task, context.clone(), vec![], task_status).await;
-                return task_status;
+                Err(e) => {
+                    tracing::warn!("Failed to generate_splits {:#?}", e);
+                    task_status = TaskStatus::ExecuteFailed;
+                    Self::compact_done(&mut compact_task, context.clone(), vec![], task_status)
+                        .await;
+                    return task_status;
+                }
             }
         }
         // Number of splits (key ranges) is equal to number of compaction tasks
@@ -310,6 +332,51 @@ impl Compactor {
 
         drop(memory_detector);
         context.compactor_metrics.compact_task_pending_num.inc();
+        if optimize_by_copy_block {
+            let runner = fast_compactor_runner::CompactorRunner::new(
+                compactor_context.clone(),
+                compact_task.clone(),
+                delete_range_agg.clone(),
+                multi_filter_key_extractor.clone(),
+                task_progress_guard.progress.clone(),
+            );
+            match runner.run().await {
+                Err(e) => {
+                    task_status = TaskStatus::ExecuteFailed;
+                    tracing::warn!(
+                        "Compaction task {} failed with error: {:#?}",
+                        compact_task.task_id,
+                        e
+                    );
+                }
+                Ok(outputs) => {
+                    let mut ssts = Vec::with_capacity(outputs.len());
+                    for output in outputs {
+                        match output.upload_join_handle.await {
+                            Ok(Ok(())) => {
+                                ssts.push(output.sst_info);
+                            }
+                            Err(e) => {
+                                task_status = TaskStatus::ExecuteFailed;
+                            }
+                            Ok(Err(e)) => {
+                                task_status = TaskStatus::ExecuteFailed;
+                            }
+                        }
+                    }
+                    output_ssts.push((0, ssts, CompactionStatistics::default()));
+                }
+            }
+            // After a compaction is done, mutate the compaction task.
+            Self::compact_done(&mut compact_task, context.clone(), output_ssts, task_status).await;
+            let cost_time = timer.stop_and_record() * 1000.0;
+            tracing::info!(
+                "Finished compaction task in {:?}ms: {}",
+                cost_time,
+                compact_task_to_string(&compact_task)
+            );
+            return task_status;
+        }
         for (split_index, _) in compact_task.splits.iter().enumerate() {
             let filter = multi_filter.clone();
             let multi_filter_key_extractor = multi_filter_key_extractor.clone();
