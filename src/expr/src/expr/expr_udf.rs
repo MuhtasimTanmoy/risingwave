@@ -21,7 +21,9 @@ use await_tree::InstrumentAwait;
 use risingwave_common::array::{ArrayImpl, ArrayRef, DataChunk};
 use risingwave_common::row::OwnedRow;
 use risingwave_common::types::{DataType, Datum};
-use risingwave_pb::expr::ExprNode;
+use risingwave_pb::expr::user_defined_function::PbExtra;
+use risingwave_pb::expr::{ExprNode, PbExternalUdfExtra, PbWasmUdfExtra};
+use risingwave_udf::wasm::{InstantiatedComponent, WasmEngine};
 use risingwave_udf::ArrowFlightUdfClient;
 
 use super::{build_from_prost, BoxedExpression};
@@ -34,9 +36,34 @@ pub struct UdfExpression {
     arg_types: Vec<DataType>,
     return_type: DataType,
     arg_schema: SchemaRef,
-    client: Arc<ArrowFlightUdfClient>,
-    identifier: String,
+    imp: UdfImpl,
     span: await_tree::Span,
+}
+
+enum UdfImpl {
+    External {
+        client: Arc<ArrowFlightUdfClient>,
+        identifier: String,
+    },
+    Wasm {
+        component: InstantiatedComponent,
+    },
+}
+
+impl std::fmt::Debug for UdfImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::External { client, identifier } => f
+                .debug_struct("External")
+                .field("client", client)
+                .field("identifier", identifier)
+                .finish(),
+            Self::Wasm { component: _ } => f
+                .debug_struct("Wasm")
+                // .field("component", component)
+                .finish(),
+        }
+    }
 }
 
 #[cfg(not(madsim))]
@@ -82,11 +109,15 @@ impl UdfExpression {
         let input =
             arrow_array::RecordBatch::try_new_with_options(self.arg_schema.clone(), columns, &opts)
                 .expect("failed to build record batch");
-        let output = self
-            .client
-            .call(&self.identifier, input)
-            .instrument_await(self.span.clone())
-            .await?;
+        let output: arrow_array::RecordBatch = match &self.imp {
+            UdfImpl::Wasm { component } => component.eval(input)?,
+            UdfImpl::External { client, identifier } => {
+                client
+                    .call(identifier, input)
+                    .instrument_await(self.span.clone())
+                    .await?
+            }
+        };
         if output.num_rows() != vis.len() {
             bail!(
                 "UDF returned {} rows, but expected {}",
@@ -117,16 +148,33 @@ impl<'a> TryFrom<&'a ExprNode> for UdfExpression {
                 .map(|t| Field::new("", DataType::from(t).into(), true))
                 .collect(),
         ));
-        // connect to UDF service
-        let client = get_or_create_client(&udf.link)?;
+
+        tracing::info!(?udf, "building UDF expression");
+
+        let imp = match &udf.extra {
+            None | Some(PbExtra::External(PbExternalUdfExtra {})) => UdfImpl::External {
+                client: get_or_create_flight_client(&udf.link)?,
+                identifier: udf.identifier.clone(),
+            },
+            Some(PbExtra::Wasm(PbWasmUdfExtra { module })) => {
+                use base64::prelude::{Engine, BASE64_STANDARD};
+
+                // This should be already validated in frontend
+                let module = BASE64_STANDARD
+                    .decode(module)
+                    .expect("failed to decode wasm module");
+                let wasm_engine = WasmEngine::get_or_create();
+                let component = wasm_engine.load_component(&module)?;
+                UdfImpl::Wasm { component }
+            }
+        };
 
         Ok(Self {
             children: udf.children.iter().map(build_from_prost).try_collect()?,
             arg_types: udf.arg_types.iter().map(|t| t.into()).collect(),
             return_type,
             arg_schema,
-            client,
-            identifier: udf.identifier.clone(),
+            imp,
             span: format!("expr_udf_call ({})", udf.identifier).into(),
         })
     }
@@ -136,7 +184,7 @@ impl<'a> TryFrom<&'a ExprNode> for UdfExpression {
 /// Get or create a client for the given UDF service.
 ///
 /// There is a global cache for clients, so that we can reuse the same client for the same service.
-pub(crate) fn get_or_create_client(link: &str) -> Result<Arc<ArrowFlightUdfClient>> {
+pub(crate) fn get_or_create_flight_client(link: &str) -> Result<Arc<ArrowFlightUdfClient>> {
     static CLIENTS: LazyLock<Mutex<HashMap<String, Weak<ArrowFlightUdfClient>>>> =
         LazyLock::new(Default::default);
     let mut clients = CLIENTS.lock().unwrap();

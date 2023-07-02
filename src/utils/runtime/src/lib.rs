@@ -164,10 +164,10 @@ pub fn init_risingwave_logger(settings: LoggerSettings, registry: prometheus::Re
     // Default filter for logging to stdout and tracing.
     let default_filter = {
         let mut filter = filter::Targets::new()
+            // force a higher level for noisy logs in 3rd-party crates
             .with_target("aws_sdk_ec2", Level::INFO)
             .with_target("aws_sdk_s3", Level::INFO)
             .with_target("aws_config", Level::WARN)
-            // Only enable WARN and ERROR for 3rd-party crates
             .with_target("aws_endpoint", Level::WARN)
             .with_target("aws_credential_types::cache::lazy_caching", Level::WARN)
             .with_target("hyper", Level::WARN)
@@ -177,7 +177,9 @@ pub fn init_risingwave_logger(settings: LoggerSettings, registry: prometheus::Re
             .with_target("isahc", Level::WARN)
             .with_target("console_subscriber", Level::WARN)
             .with_target("reqwest", Level::WARN)
-            .with_target("sled", Level::INFO);
+            .with_target("sled", Level::INFO)
+            .with_target("cranelift", Level::INFO)
+            .with_target("wasmtime", Level::INFO);
 
         filter = configure_risingwave_targets_fmt(filter);
 

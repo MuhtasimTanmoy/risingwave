@@ -65,7 +65,9 @@ pub enum ExprError {
     Internal(#[from] anyhow::Error),
 
     #[error("UDF error: {0}")]
-    Udf(#[from] risingwave_udf::Error),
+    ExternalUdf(#[from] risingwave_udf::Error),
+    #[error("UDF error: {0}")]
+    WasmUdf(#[from] risingwave_udf::wasm::WasmUdfError),
 
     #[error("not a constant")]
     NotConstant,

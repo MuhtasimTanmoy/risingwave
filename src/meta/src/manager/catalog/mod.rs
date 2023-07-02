@@ -618,6 +618,7 @@ where
         #[cfg(not(test))]
         user_core.ensure_user_id(function.owner)?;
 
+        tracing::debug!("create function: {:?}", function);
         let mut functions = BTreeMapTransaction::new(&mut database_core.functions);
         functions.insert(function.id, function.clone());
         commit_meta!(self, functions)?;

@@ -208,6 +208,7 @@ message ExprNode {
     // Non-deterministic functions
     PROCTIME = 2023;
   }
+  // Only use this field for function call. For other types of expression, it should be UNSPECIFIED.
   Type function_type = 1;
   data.DataType return_type = 3;
   oneof rex_node {
@@ -387,15 +388,35 @@ message WindowFunction {
   WindowFrame frame = 5;
 }
 
+// Note: due to historic reasons, UserDefinedFunction is a oneof variant parallel to FunctionCall,
+// while UserDefinedTableFunction is embedded as a field in TableFunction.
+
+
 message UserDefinedFunction {
   repeated ExprNode children = 1;
   string name = 2;
   repeated data.DataType arg_types = 3;
   string language = 4;
+  // external function service only
   string link = 5;
   string identifier = 6;
+
+  oneof extra {
+    ExternalUdfExtra external = 7;
+    WasmUdfExtra wasm = 8;
+  }
 }
 
+// extra information for external functions
+message ExternalUdfExtra {}
+
+// extra information for wasm functions
+message WasmUdfExtra {
+  // base64 encoded .wasm file
+  string module = 1;
+}
+
+// Additional information for user defined table functions.
 message UserDefinedTableFunction {
   repeated data.DataType arg_types = 3;
   string language = 4;
