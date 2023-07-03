@@ -175,6 +175,8 @@ where
         full_key: FullKey<Vec<u8>>,
         is_new_user_key: bool,
         uncompressed_size: usize,
+        stale_key_count: u64,
+        total_key_count: u64,
     ) -> HummockResult<()> {
         if self
             .current_builder
@@ -203,7 +205,13 @@ where
 
         let builder = self.current_builder.as_mut().unwrap();
         builder
-            .add_raw_block(full_key, buf, uncompressed_size)
+            .add_raw_block(
+                full_key,
+                buf,
+                uncompressed_size,
+                stale_key_count,
+                total_key_count,
+            )
             .await
     }
 

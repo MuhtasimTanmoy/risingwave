@@ -212,6 +212,8 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         full_key: FullKey<Vec<u8>>,
         buf: Bytes,
         uncompressed_size: usize,
+        stale_key_count: u64,
+        total_key_count: u64,
     ) -> HummockResult<()> {
         let smallest_key = full_key.encode();
         self.last_full_key.clear();
@@ -219,6 +221,8 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
         if !self.block_builder.is_empty() {
             self.build_block().await?;
         }
+        self.stale_key_count += stale_key_count;
+        self.total_key_count += total_key_count;
         self.block_metas.push(BlockMeta {
             offset: self.writer.data_len() as u32,
             len: buf.len() as u32,

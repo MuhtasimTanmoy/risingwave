@@ -179,6 +179,19 @@ impl ConcatSstableIterator {
         self.sstable_iter.as_mut().unwrap()
     }
 
+    pub fn estimate_key_count(&self, uncompressed_block_size: u64) -> (u64, u64) {
+        let total_size = self.sstables[self.cur_idx].uncompressed_file_size;
+        if total_size == 0 {
+            return (0, 0);
+        }
+        // use ratio to avoid multiply overflow
+        let ratio = uncompressed_block_size * 10000 / total_size;
+        (
+            self.sstables[self.cur_idx].stale_key_count * ratio / 10000,
+            self.sstables[self.cur_idx].total_key_count * ratio / 10000,
+        )
+    }
+
     pub async fn init_block_iter(&mut self) -> HummockResult<()> {
         if let Some(sstable) = self.sstable_iter.as_mut() {
             let (buf, uncompressed_capacity) = sstable.download_next_block().await?.unwrap();
@@ -231,6 +244,7 @@ impl ConcatSstableIterator {
 pub struct CompactorRunner {
     left: Box<ConcatSstableIterator>,
     right: Box<ConcatSstableIterator>,
+    task_id: u64,
     executor:
         CompactTaskExecutor<RemoteBuilderFactory<StreamingSstableWriterFactory, Xor8FilterBuilder>>,
 }
@@ -300,12 +314,14 @@ impl CompactorRunner {
             executor: CompactTaskExecutor::new(sst_builder, task_config),
             left,
             right,
+            task_id: task.task_id,
         }
     }
 
     pub async fn run(mut self) -> HummockResult<Vec<SplitTableOutput>> {
         self.left.rewind().await?;
         self.right.rewind().await?;
+        let mut raw_block_count = 0;
         while self.left.is_valid() && self.right.is_valid() {
             let ret = self
                 .left
@@ -332,9 +348,19 @@ impl CompactorRunner {
                         .download_next_block()
                         .await?
                         .unwrap();
+                    let (stale_count, total_count) =
+                        first.estimate_key_count(uncompressed_size as u64);
+                    raw_block_count += 1;
                     self.executor
                         .builder
-                        .add_raw_block(block, full_key, false, uncompressed_size)
+                        .add_raw_block(
+                            block,
+                            full_key,
+                            false,
+                            uncompressed_size,
+                            stale_count,
+                            total_count,
+                        )
                         .await?;
                     self.executor.clear();
                 }
@@ -373,17 +399,32 @@ impl CompactorRunner {
         }
 
         while rest_data.is_valid() {
-            let sstable_iter = rest_data.sstable_iter.as_mut().unwrap();
+            let mut sstable_iter = rest_data.sstable_iter.take().unwrap();
             while sstable_iter.is_valid() {
                 let full_key = FullKey::decode(sstable_iter.next_block_smallest()).to_vec();
                 let (block, uncompressed_size) = sstable_iter.download_next_block().await?.unwrap();
+                let (stale_count, total_count) =
+                    rest_data.estimate_key_count(uncompressed_size as u64);
+                raw_block_count += 1;
                 self.executor
                     .builder
-                    .add_raw_block(block, full_key, false, uncompressed_size)
+                    .add_raw_block(
+                        block,
+                        full_key,
+                        false,
+                        uncompressed_size,
+                        stale_count,
+                        total_count,
+                    )
                     .await?;
             }
             rest_data.next_sstable().await?;
         }
+        tracing::info!(
+            "OPTIMIZATION: skip {} block for task-{}",
+            raw_block_count,
+            self.task_id
+        );
         self.executor.builder.finish().await
     }
 }

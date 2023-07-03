@@ -1341,11 +1341,11 @@ pub(crate) mod tests {
         let sst_ret1 = ret1.pop().unwrap();
         let sst_ret2 = ret2.pop().unwrap();
         println!(
-            "{}.count={} {}.count={}",
+            "{}.file size={} {}.file size={}",
             sst_ret1.sst_info.object_id,
-            sst_ret1.sst_info.total_key_count,
+            sst_ret1.sst_info.file_size,
             sst_ret2.sst_info.object_id,
-            sst_ret2.sst_info.total_key_count,
+            sst_ret2.sst_info.file_size,
         );
         let mut stats = StoreLocalStatistic::default();
         let table1 = compact_ctx

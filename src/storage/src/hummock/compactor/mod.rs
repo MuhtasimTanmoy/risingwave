@@ -253,6 +253,7 @@ impl Compactor {
             && compact_task.target_level > 0
             && compact_task.input_ssts.len() == 2
             && !compact_task.input_ssts[1].table_infos.is_empty()
+            && compact_task.compression_algorithm > 0
         {
             optimize_by_copy_block = true;
         } else {
@@ -987,7 +988,8 @@ impl Compactor {
             }
         };
 
-        compact_timer.observe_duration();
+        let time = compact_timer.stop_and_record();
+        println!("cost time: {}", time);
 
         let ssts =
             Self::report_progress(self.context.clone(), task_progress, split_table_outputs).await?;
