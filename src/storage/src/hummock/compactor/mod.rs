@@ -130,7 +130,7 @@ impl Compactor {
             .filter(|level| level.level_idx == compact_task.target_level)
             .flat_map(|level| level.table_infos.iter())
             .collect_vec();
-        let select_size = select_table_infos
+        let select_level_size = select_table_infos
             .iter()
             .map(|table| table.file_size)
             .sum::<u64>();
@@ -138,20 +138,20 @@ impl Compactor {
             .compactor_metrics
             .compact_read_current_level
             .with_label_values(&[&group_label, &cur_level_label])
-            .inc_by(select_size);
+            .inc_by(select_level_size);
         context
             .compactor_metrics
             .compact_read_sstn_current_level
             .with_label_values(&[&group_label, &cur_level_label])
             .inc_by(select_table_infos.len() as u64);
 
-        let target_level_read_bytes = target_table_infos.iter().map(|t| t.file_size).sum::<u64>();
+        let target_level_size = target_table_infos.iter().map(|t| t.file_size).sum::<u64>();
         let next_level_label = compact_task.target_level.to_string();
         context
             .compactor_metrics
             .compact_read_next_level
             .with_label_values(&[&group_label, next_level_label.as_str()])
-            .inc_by(target_level_read_bytes);
+            .inc_by(target_level_size);
         context
             .compactor_metrics
             .compact_read_sstn_next_level
@@ -254,6 +254,7 @@ impl Compactor {
             && compact_task.input_ssts.len() == 2
             && !compact_task.input_ssts[1].table_infos.is_empty()
             && compact_task.compression_algorithm > 0
+            && target_level_size > select_level_size
         {
             optimize_by_copy_block = true;
         } else {
@@ -988,8 +989,7 @@ impl Compactor {
             }
         };
 
-        let time = compact_timer.stop_and_record();
-        println!("cost time: {}", time);
+        compact_timer.observe_duration();
 
         let ssts =
             Self::report_progress(self.context.clone(), task_progress, split_table_outputs).await?;

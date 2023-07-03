@@ -321,7 +321,8 @@ impl CompactorRunner {
     pub async fn run(mut self) -> HummockResult<Vec<SplitTableOutput>> {
         self.left.rewind().await?;
         self.right.rewind().await?;
-        let mut raw_block_count = 0;
+        let mut skip_raw_block_count = 0;
+        let mut skip_raw_block_size = 0;
         while self.left.is_valid() && self.right.is_valid() {
             let ret = self
                 .left
@@ -350,7 +351,8 @@ impl CompactorRunner {
                         .unwrap();
                     let (stale_count, total_count) =
                         first.estimate_key_count(uncompressed_size as u64);
-                    raw_block_count += 1;
+                    skip_raw_block_size += block.len();
+                    skip_raw_block_count += 1;
                     self.executor
                         .builder
                         .add_raw_block(
@@ -405,7 +407,8 @@ impl CompactorRunner {
                 let (block, uncompressed_size) = sstable_iter.download_next_block().await?.unwrap();
                 let (stale_count, total_count) =
                     rest_data.estimate_key_count(uncompressed_size as u64);
-                raw_block_count += 1;
+                skip_raw_block_count += 1;
+                skip_raw_block_size += block.len();
                 self.executor
                     .builder
                     .add_raw_block(
@@ -421,8 +424,9 @@ impl CompactorRunner {
             rest_data.next_sstable().await?;
         }
         tracing::info!(
-            "OPTIMIZATION: skip {} block for task-{}",
-            raw_block_count,
+            "OPTIMIZATION: skip {} blocks (total bytes: {}) for task-{}",
+            skip_raw_block_count,
+            skip_raw_block_size,
             self.task_id
         );
         self.executor.builder.finish().await
@@ -483,15 +487,6 @@ impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
                 self.watermark_can_see_last_key = true;
             }
 
-            // if let HummockValue::Put(v) = value {
-            //     let k =
-            // u64::from_be_bytes(iter.key().user_key.table_key.as_ref()[0..8].try_into().unwrap());
-            //     if k < 110000 && k > 106000 {
-            //         println!("epoch {}, table key: {}, value: {}, drop: {}, is_new_user_key: {},
-            // ",  iter.key().epoch,                  k,
-            // String::from_utf8(v.to_vec()).unwrap(), drop, is_new_user_key,         );
-            //     }
-            // }
             if drop {
                 iter.next();
                 continue;
