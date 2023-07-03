@@ -15,9 +15,9 @@
 mod compaction_executor;
 mod compaction_filter;
 pub mod compaction_utils;
-mod compactor_runner;
+pub mod compactor_runner;
 mod context;
-mod fast_compactor_runner;
+pub mod fast_compactor_runner;
 mod iterator;
 mod shared_buffer_compact;
 pub(super) mod task_progress;
@@ -336,11 +336,25 @@ impl Compactor {
             let runner = fast_compactor_runner::CompactorRunner::new(
                 compactor_context.clone(),
                 compact_task.clone(),
-                delete_range_agg.clone(),
                 multi_filter_key_extractor.clone(),
                 task_progress_guard.progress.clone(),
             );
-            match runner.run().await {
+            let ret = match runner.run().await {
+                Err(e) => Err(e),
+                Ok(outputs) => {
+                    Self::report_progress(
+                        context.clone(),
+                        Some(task_progress_guard.progress.clone()),
+                        outputs,
+                    )
+                    .await
+                }
+            };
+
+            match ret {
+                Ok(ssts) => {
+                    output_ssts.push((0, ssts, CompactionStatistics::default()));
+                }
                 Err(e) => {
                     task_status = TaskStatus::ExecuteFailed;
                     tracing::warn!(
@@ -349,24 +363,8 @@ impl Compactor {
                         e
                     );
                 }
-                Ok(outputs) => {
-                    let mut ssts = Vec::with_capacity(outputs.len());
-                    for output in outputs {
-                        match output.upload_join_handle.await {
-                            Ok(Ok(())) => {
-                                ssts.push(output.sst_info);
-                            }
-                            Err(e) => {
-                                task_status = TaskStatus::ExecuteFailed;
-                            }
-                            Ok(Err(e)) => {
-                                task_status = TaskStatus::ExecuteFailed;
-                            }
-                        }
-                    }
-                    output_ssts.push((0, ssts, CompactionStatistics::default()));
-                }
             }
+
             // After a compaction is done, mutate the compaction task.
             Self::compact_done(&mut compact_task, context.clone(), output_ssts, task_status).await;
             let cost_time = timer.stop_and_record() * 1000.0;
@@ -991,6 +989,35 @@ impl Compactor {
 
         compact_timer.observe_duration();
 
+        let ssts =
+            Self::report_progress(self.context.clone(), task_progress, split_table_outputs).await?;
+
+        self.context
+            .compactor_metrics
+            .get_table_id_total_time_duration
+            .observe(self.get_id_time.load(Ordering::Relaxed) as f64 / 1000.0 / 1000.0);
+
+        debug_assert!(ssts
+            .iter()
+            .all(|table_info| table_info.sst_info.get_table_ids().is_sorted()));
+
+        if task_id.is_some() {
+            // skip shared buffer compaction
+            tracing::info!(
+                "Finish Task {:?} split_index {:?} sst count {}",
+                task_id,
+                split_index,
+                ssts.len()
+            );
+        }
+        Ok((ssts, table_stats_map))
+    }
+
+    pub async fn report_progress(
+        context: Arc<CompactorContext>,
+        task_progress: Option<Arc<TaskProgress>>,
+        split_table_outputs: Vec<SplitTableOutput>,
+    ) -> HummockResult<Vec<LocalSstableInfo>> {
         let mut ssts = Vec::with_capacity(split_table_outputs.len());
         let mut upload_join_handles = vec![];
 
@@ -1003,7 +1030,7 @@ impl Compactor {
             ssts.push(sst_info);
 
             let tracker_cloned = task_progress.clone();
-            let context_cloned = self.context.clone();
+            let context_cloned = context.clone();
             upload_join_handles.push(async move {
                 upload_join_handle
                     .verbose_instrument_await("upload")
@@ -1034,25 +1061,7 @@ impl Compactor {
         try_join_all(upload_join_handles)
             .verbose_instrument_await("join")
             .await?;
-        self.context
-            .compactor_metrics
-            .get_table_id_total_time_duration
-            .observe(self.get_id_time.load(Ordering::Relaxed) as f64 / 1000.0 / 1000.0);
-
-        debug_assert!(ssts
-            .iter()
-            .all(|table_info| table_info.sst_info.get_table_ids().is_sorted()));
-
-        if task_id.is_some() {
-            // skip shared buffer compaction
-            tracing::info!(
-                "Finish Task {:?} split_index {:?} sst count {}",
-                task_id,
-                split_index,
-                ssts.len()
-            );
-        }
-        Ok((ssts, table_stats_map))
+        Ok(ssts)
     }
 
     async fn compact_key_range_impl<F: SstableWriterFactory, B: FilterBuilder>(

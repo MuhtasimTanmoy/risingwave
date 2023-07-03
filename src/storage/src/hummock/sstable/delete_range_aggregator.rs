@@ -114,7 +114,7 @@ pub(crate) fn apply_event(epochs: &mut BTreeSet<HummockEpoch>, event: &Compactio
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CompactionDeleteRanges {
     events: Vec<CompactionDeleteRangeEvent>,
     gc_delete_keys: bool,
@@ -205,13 +205,6 @@ impl CompactionDeleteRangesBuilder {
 }
 
 impl CompactionDeleteRanges {
-    pub(crate) fn for_test() -> Self {
-        Self {
-            events: vec![],
-            gc_delete_keys: false,
-        }
-    }
-
     pub(crate) fn iter(self: &Arc<Self>) -> CompactionDeleteRangeIterator {
         CompactionDeleteRangeIterator {
             events: self.clone(),

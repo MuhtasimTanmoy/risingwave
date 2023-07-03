@@ -567,6 +567,7 @@ pub(super) mod tests {
         test_value_of, TEST_KEYS_COUNT,
     };
     use crate::hummock::{CachePolicy, Sstable, Xor16FilterBuilder, Xor8FilterBuilder};
+    use crate::monitor::StoreLocalStatistic;
 
     #[tokio::test]
     async fn test_empty() {
@@ -656,7 +657,7 @@ pub(super) mod tests {
 
         // build remote table
         let sstable_store = mock_sstable_store();
-        let (table, _) = gen_test_sstable_impl::<Vec<u8>, F>(
+        let sst_info = gen_test_sstable_impl::<Vec<u8>, F>(
             opts,
             0,
             (0..TEST_KEYS_COUNT).map(|i| (test_key_of(i), HummockValue::put(test_value_of(i)))),
@@ -665,13 +666,17 @@ pub(super) mod tests {
             CachePolicy::NotFill,
         )
         .await;
+        let table = sstable_store
+            .sstable(&sst_info, &mut StoreLocalStatistic::default())
+            .await
+            .unwrap();
 
-        assert_eq!(table.has_bloom_filter(), with_blooms);
+        assert_eq!(table.value().has_bloom_filter(), with_blooms);
         for i in 0..key_count {
             let full_key = test_key_of(i);
-            if table.has_bloom_filter() {
+            if table.value().has_bloom_filter() {
                 let hash = Sstable::hash_for_bloom_filter(full_key.user_key.encode().as_slice(), 0);
-                assert!(table.may_match_hash(hash));
+                assert!(table.value().may_match_hash(hash));
             }
         }
     }

@@ -53,6 +53,7 @@ impl CompactorRunner {
             _ => CompressionAlgorithm::Zstd,
         };
         options.capacity = estimate_task_memory_capacity(context.clone(), &task);
+        println!("capacity: {}", options.capacity);
 
         let key_range = KeyRange {
             left: Bytes::copy_from_slice(task.splits[split_index].get_left()),

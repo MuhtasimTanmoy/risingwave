@@ -51,6 +51,7 @@ pub struct BlockStreamIterator {
     /// For key sanity check of divided SST and debugging
     sstable: TableHolder,
     iter: Option<BlockIterator>,
+    task_progress: Arc<TaskProgress>,
 }
 
 impl BlockStreamIterator {
@@ -68,12 +69,17 @@ impl BlockStreamIterator {
 
     /// Initialises a new [`BlockStreamIterator`] which iterates over the given [`BlockStream`].
     /// The iterator reads at most `max_block_count` from the stream.
-    pub fn new(sstable: TableHolder, block_stream: BlockStream) -> Self {
+    pub fn new(
+        sstable: TableHolder,
+        block_stream: BlockStream,
+        task_progress: Arc<TaskProgress>,
+    ) -> Self {
         Self {
             block_stream,
             next_block_index: 0,
             sstable,
             iter: None,
+            task_progress,
         }
     }
 
@@ -113,6 +119,14 @@ impl BlockStreamIterator {
 
     fn is_valid(&self) -> bool {
         self.next_block_index < self.sstable.value().meta.block_metas.len()
+    }
+}
+
+impl Drop for BlockStreamIterator {
+    fn drop(&mut self) {
+        self.task_progress
+            .num_pending_read_io
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -177,17 +191,14 @@ impl ConcatSstableIterator {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.sstable_iter
-            .as_ref()
-            .map(|iter| iter.is_valid())
-            .unwrap_or(false)
+        self.cur_idx < self.sstables.len()
     }
 
     /// Resets the iterator, loads the specified SST, and seeks in that SST to `seek_key` if given.
     async fn seek_idx(&mut self, idx: usize) -> HummockResult<()> {
         self.sstable_iter.take();
         self.cur_idx = idx;
-        while self.cur_idx < self.sstables.len() {
+        if self.cur_idx < self.sstables.len() {
             let table_info = &self.sstables[self.cur_idx];
             let sstable = self
                 .sstable_store
@@ -196,6 +207,9 @@ impl ConcatSstableIterator {
                 .await?;
             let stats_ptr = self.stats.remote_io_time.clone();
             let now = Instant::now();
+            self.task_progress
+                .num_pending_read_io
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let block_stream = self
                 .sstable_store
                 .get_stream(sstable.value(), None)
@@ -206,9 +220,9 @@ impl ConcatSstableIterator {
             let add = (now.elapsed().as_secs_f64() * 1000.0).ceil();
             stats_ptr.fetch_add(add as u64, atomic::Ordering::Relaxed);
 
-            let sstable_iter = BlockStreamIterator::new(sstable, block_stream);
+            let sstable_iter =
+                BlockStreamIterator::new(sstable, block_stream, self.task_progress.clone());
             self.sstable_iter = Some(sstable_iter);
-            return Ok(());
         }
         Ok(())
     }
@@ -225,7 +239,6 @@ impl CompactorRunner {
     pub fn new(
         context: Arc<CompactorContext>,
         task: CompactTask,
-        del_agg: Arc<CompactionDeleteRanges>,
         filter_key_extractor: Arc<FilterKeyExtractorImpl>,
         task_progress: Arc<TaskProgress>,
     ) -> Self {
@@ -266,7 +279,7 @@ impl CompactorRunner {
             builder_factory,
             context.compactor_metrics.clone(),
             Some(task_progress.clone()),
-            del_agg,
+            Arc::new(CompactionDeleteRanges::default()),
             task_config.key_range.clone(),
             task_config.is_target_l0_or_lbase,
             task_config.split_by_table,
@@ -299,21 +312,22 @@ impl CompactorRunner {
                 .current_sstable()
                 .key()
                 .cmp(&self.right.current_sstable().key());
-            if ret == Ordering::Greater {
-                std::mem::swap(&mut self.left, &mut self.right);
-            }
-            if self.left.current_sstable().iter.is_none() {
-                let right_key = self.right.current_sstable().key();
-                while self.left.current_sstable().is_valid() {
-                    let full_key =
-                        FullKey::decode(self.left.current_sstable().next_block_largest());
+            let (first, second) = if ret == Ordering::Less {
+                (&mut self.left, &mut self.right)
+            } else {
+                (&mut self.right, &mut self.left)
+            };
+            assert!(ret != Ordering::Equal);
+            if first.current_sstable().iter.is_none() {
+                let right_key = second.current_sstable().key();
+                while first.current_sstable().is_valid() {
+                    let full_key = FullKey::decode(first.current_sstable().next_block_largest());
                     if full_key.ge(&right_key) {
                         break;
                     }
                     let full_key =
-                        FullKey::decode(self.left.current_sstable().next_block_smallest()).to_vec();
-                    let (block, uncompressed_size) = self
-                        .left
+                        FullKey::decode(first.current_sstable().next_block_smallest()).to_vec();
+                    let (block, uncompressed_size) = first
                         .current_sstable()
                         .download_next_block()
                         .await?
@@ -322,40 +336,35 @@ impl CompactorRunner {
                         .builder
                         .add_raw_block(block, full_key, false, uncompressed_size)
                         .await?;
-                    if !self.executor.last_key.is_empty() {
-                        self.executor.last_key = FullKey::default();
-                    }
+                    self.executor.clear();
                 }
-                if !self.left.current_sstable().is_valid() {
-                    self.left.next_sstable().await?;
+                if !first.current_sstable().is_valid() {
+                    first.next_sstable().await?;
                     continue;
                 }
-                self.left.init_block_iter().await?;
-                if !self.executor.last_key.is_empty() {
-                    self.executor.last_key = FullKey::default();
-                }
+                first.init_block_iter().await?;
             }
 
-            assert!(self.left.is_valid());
-            let target_key = self.right.current_sstable().key();
-            let mut iter = self
-                .left
-                .sstable_iter
-                .as_mut()
-                .unwrap()
-                .iter
-                .as_mut()
-                .unwrap();
-            self.executor.run(&mut iter, target_key).await?;
+            let target_key = second.current_sstable().key();
+            let iter = first.sstable_iter.as_mut().unwrap().iter.as_mut().unwrap();
+            self.executor.run(iter, target_key).await?;
+            if !iter.is_valid() {
+                first.sstable_iter.as_mut().unwrap().iter.take();
+                if !first.current_sstable().is_valid() {
+                    first.next_sstable().await?;
+                }
+            }
         }
-        if !self.left.is_valid() {
+        let rest_data = if !self.left.is_valid() {
             if !self.right.is_valid() {
                 return self.executor.builder.finish().await;
             }
-            std::mem::swap(&mut self.left, &mut self.right);
-        }
+            &mut self.right
+        } else {
+            &mut self.left
+        };
         {
-            let sstable_iter = self.left.sstable_iter.as_mut().unwrap();
+            let sstable_iter = rest_data.sstable_iter.as_mut().unwrap();
             let target_key = FullKey::decode(&sstable_iter.sstable.value().meta.largest_key);
             if let Some(iter) = sstable_iter.iter.as_mut() {
                 self.executor.run(iter, target_key).await?;
@@ -363,8 +372,8 @@ impl CompactorRunner {
             }
         }
 
-        while self.left.is_valid() {
-            let sstable_iter = self.left.sstable_iter.as_mut().unwrap();
+        while rest_data.is_valid() {
+            let sstable_iter = rest_data.sstable_iter.as_mut().unwrap();
             while sstable_iter.is_valid() {
                 let full_key = FullKey::decode(sstable_iter.next_block_smallest()).to_vec();
                 let (block, uncompressed_size) = sstable_iter.download_next_block().await?.unwrap();
@@ -373,7 +382,7 @@ impl CompactorRunner {
                     .add_raw_block(block, full_key, false, uncompressed_size)
                     .await?;
             }
-            self.left.next_sstable().await?;
+            rest_data.next_sstable().await?;
         }
         self.executor.builder.finish().await
     }
@@ -396,6 +405,14 @@ impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
             watermark_can_see_last_key: false,
             user_key_last_delete_epoch: HummockEpoch::MAX,
         }
+    }
+
+    fn clear(&mut self) {
+        if !self.last_key.is_empty() {
+            self.last_key = FullKey::default();
+        }
+        self.watermark_can_see_last_key = false;
+        self.user_key_last_delete_epoch = HummockEpoch::MAX;
     }
 
     pub async fn run(
@@ -424,6 +441,16 @@ impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
             if epoch <= self.task_config.watermark {
                 self.watermark_can_see_last_key = true;
             }
+
+            // if let HummockValue::Put(v) = value {
+            //     let k =
+            // u64::from_be_bytes(iter.key().user_key.table_key.as_ref()[0..8].try_into().unwrap());
+            //     if k < 110000 && k > 106000 {
+            //         println!("epoch {}, table key: {}, value: {}, drop: {}, is_new_user_key: {},
+            // ",  iter.key().epoch,                  k,
+            // String::from_utf8(v.to_vec()).unwrap(), drop, is_new_user_key,         );
+            //     }
+            // }
             if drop {
                 iter.next();
                 continue;

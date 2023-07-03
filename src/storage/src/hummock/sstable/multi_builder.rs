@@ -139,7 +139,7 @@ where
             compactor_metrics: Arc::new(CompactorMetrics::unused()),
             task_progress: None,
             last_sealed_key: UserKey::default(),
-            del_agg: Arc::new(CompactionDeleteRanges::for_test()),
+            del_agg: Arc::new(CompactionDeleteRanges::default()),
             key_range: KeyRange::inf(),
             last_table_id: 0,
             is_target_level_l0_or_lbase: false,
@@ -182,6 +182,7 @@ where
             .map(|builder| is_new_user_key && builder.reach_capacity())
             .unwrap_or(false)
         {
+            println!("switch builder");
             let monotonic_deletes = self
                 .del_agg
                 .get_tombstone_between(self.last_sealed_key.as_ref(), full_key.user_key.as_ref());
@@ -280,6 +281,7 @@ where
                 .get_tombstone_between(self.last_sealed_key.as_ref(), full_key.user_key);
             self.seal_current(monotonic_deletes).await?;
             self.last_sealed_key.extend_from_other(&full_key.user_key);
+            println!("switch builder");
         }
 
         if self.current_builder.is_none() {

@@ -455,7 +455,14 @@ impl BlockBuilder {
             debug_assert!(!key.is_empty());
             debug_assert_eq!(
                 KeyComparator::compare_encoded_full_key(&self.last_key[..], &key[..]),
-                Ordering::Less
+                Ordering::Less,
+                "epoch: {}, table key: {}",
+                full_key.epoch,
+                u64::from_be_bytes(
+                    full_key.user_key.table_key.as_ref()[0..8]
+                        .try_into()
+                        .unwrap()
+                ),
             );
         }
         // Update restart point if needed and calculate diff key.
