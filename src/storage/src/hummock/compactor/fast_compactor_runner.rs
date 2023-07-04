@@ -345,11 +345,7 @@ impl CompactorRunner {
                     let full_key =
                         FullKey::decode(first.current_sstable().next_block_smallest()).to_vec();
                     if self.executor.last_key_is_delete
-                        && self
-                            .executor
-                            .last_key
-                            .user_key
-                            .eq(&full_key.user_key)
+                        && self.executor.last_key.user_key.eq(&full_key.user_key)
                     {
                         // If the last key is delete tombstone, we can not append the origin block
                         // because it would cause a deleted key could be see by user again.

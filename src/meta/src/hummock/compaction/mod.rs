@@ -311,8 +311,8 @@ pub fn create_compaction_task(
 
     let mut compression_algorithm =
         get_compression_algorithm(compaction_config, base_level, input.target_level);
-    if input.target_level > 0
-        && compression_algorithm.eq(COMPRESSION_ALGORITHM_NONE)
+    if compression_algorithm.eq(COMPRESSION_ALGORITHM_NONE)
+        && input.input_levels.iter().all(|level| level.level_idx > 0)
         && input
             .input_levels
             .iter()
