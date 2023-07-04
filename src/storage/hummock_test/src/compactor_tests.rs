@@ -39,8 +39,8 @@ pub(crate) mod tests {
     };
     use risingwave_meta::hummock::{HummockManagerRef, MockHummockMetaClient};
     use risingwave_meta::storage::MetaStore;
-    use risingwave_pb::hummock::{CompactTask, HummockVersion, InputLevel, KeyRange, TableOption};
     use risingwave_pb::common::{HostAddress, WorkerType};
+    use risingwave_pb::hummock::{CompactTask, HummockVersion, InputLevel, KeyRange, TableOption};
     use risingwave_pb::meta::add_worker_node_request::Property;
     use risingwave_rpc_client::HummockMetaClient;
     use risingwave_storage::filter_key_extractor::{

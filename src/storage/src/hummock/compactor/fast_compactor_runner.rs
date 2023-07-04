@@ -351,7 +351,7 @@ impl CompactorRunner {
                         .unwrap();
                     let (stale_count, total_count) =
                         first.estimate_key_count(uncompressed_size as u64);
-                    skip_raw_block_size += block.len();
+                    skip_raw_block_size += block.len() as u64;
                     skip_raw_block_count += 1;
                     self.executor
                         .builder
@@ -408,7 +408,7 @@ impl CompactorRunner {
                 let (stale_count, total_count) =
                     rest_data.estimate_key_count(uncompressed_size as u64);
                 skip_raw_block_count += 1;
-                skip_raw_block_size += block.len();
+                skip_raw_block_size += block.len() as u64;
                 self.executor
                     .builder
                     .add_raw_block(
@@ -423,11 +423,18 @@ impl CompactorRunner {
             }
             rest_data.next_sstable().await?;
         }
+        let mut total_read_bytes = 0;
+        for sst in &self.left.sstables {
+            total_read_bytes += sst.file_size;
+        }
+        for sst in &self.right.sstables {
+            total_read_bytes += sst.file_size;
+        }
         tracing::info!(
-            "OPTIMIZATION: skip {} blocks (total bytes: {}) for task-{}",
+            "OPTIMIZATION: skip {} blocks for task-{}, optimize {}% data compression",
             skip_raw_block_count,
-            skip_raw_block_size,
-            self.task_id
+            self.task_id,
+            skip_raw_block_size * 100 / total_read_bytes,
         );
         self.executor.builder.finish().await
     }

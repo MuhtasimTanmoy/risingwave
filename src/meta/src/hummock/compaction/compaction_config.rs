@@ -31,6 +31,9 @@ const DEFAULT_LEVEL0_STOP_WRITE_THRESHOLD_SUB_LEVEL_NUMBER: u64 = 1000;
 const DEFAULT_MAX_COMPACTION_FILE_COUNT: u64 = 96;
 const DEFAULT_MIN_SUB_LEVEL_COMPACT_LEVEL_COUNT: u32 = 3;
 const DEFAULT_MIN_OVERLAPPING_SUB_LEVEL_COMPACT_LEVEL_COUNT: u32 = 6;
+pub const COMPRESSION_ALGORITHM_NONE: &str = "None";
+pub const COMPRESSION_ALGORITHM_LZ4: &str = "Lz4";
+pub const COMPRESSION_ALGORITHM_ZSTD: &str = "Zstd";
 
 pub struct CompactionConfigBuilder {
     config: CompactionConfig,
@@ -52,13 +55,13 @@ impl CompactionConfigBuilder {
                 // L0/L1 and L2 do not use compression algorithms
                 // L3 - L4 use Lz4, else use Zstd
                 compression_algorithm: vec![
-                    "None".to_string(),
-                    "None".to_string(),
-                    "None".to_string(),
-                    "Lz4".to_string(),
-                    "Lz4".to_string(),
-                    "Zstd".to_string(),
-                    "Zstd".to_string(),
+                    COMPRESSION_ALGORITHM_NONE.to_string(),
+                    COMPRESSION_ALGORITHM_NONE.to_string(),
+                    COMPRESSION_ALGORITHM_NONE.to_string(),
+                    COMPRESSION_ALGORITHM_LZ4.to_string(),
+                    COMPRESSION_ALGORITHM_LZ4.to_string(),
+                    COMPRESSION_ALGORITHM_ZSTD.to_string(),
+                    COMPRESSION_ALGORITHM_ZSTD.to_string(),
                 ],
                 compaction_filter_mask: (CompactionFilterFlag::STATE_CLEAN
                     | CompactionFilterFlag::TTL)

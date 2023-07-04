@@ -33,6 +33,9 @@ use risingwave_pb::hummock::compaction_config::CompactionMode;
 use risingwave_pb::hummock::hummock_version::Levels;
 use risingwave_pb::hummock::{CompactTask, CompactionConfig, KeyRange, LevelType};
 
+use crate::hummock::compaction::compaction_config::{
+    COMPRESSION_ALGORITHM_LZ4, COMPRESSION_ALGORITHM_NONE,
+};
 pub use crate::hummock::compaction::level_selector::{
     default_level_selector, DynamicLevelSelector, DynamicLevelSelectorCore, LevelSelector,
     ManualCompactionSelector, SpaceReclaimCompactionSelector, TtlCompactionSelector,
@@ -306,12 +309,21 @@ pub fn create_compaction_task(
         compaction_config.target_file_size_base << step
     };
 
+    let mut compression_algorithm =
+        get_compression_algorithm(compaction_config, base_level, input.target_level);
+    if input.target_level > 0
+        && compression_algorithm.eq(COMPRESSION_ALGORITHM_NONE)
+        && input
+            .input_levels
+            .iter()
+            .all(|level| level.table_infos.iter().all(|sst| sst.table_ids.len() == 1))
+    {
+        // optimize for block copy.
+        compression_algorithm = COMPRESSION_ALGORITHM_LZ4.to_string();
+    }
+
     CompactionTask {
-        compression_algorithm: get_compression_algorithm(
-            compaction_config,
-            base_level,
-            input.target_level,
-        ),
+        compression_algorithm,
         base_level,
         input,
         target_file_size,

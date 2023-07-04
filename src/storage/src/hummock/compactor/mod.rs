@@ -367,6 +367,7 @@ impl Compactor {
                 }
             }
 
+            context.compactor_metrics.compact_task_pending_num.dec();
             // After a compaction is done, mutate the compaction task.
             Self::compact_done(&mut compact_task, context.clone(), output_ssts, task_status).await;
             let cost_time = timer.stop_and_record() * 1000.0;
