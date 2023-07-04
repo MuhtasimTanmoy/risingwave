@@ -1297,16 +1297,17 @@ pub(crate) mod tests {
 
         let sstable_store = compact_ctx.sstable_store.clone();
         let capacity = 4 * 1024 * 1024;
-        let options = SstableBuilderOptions {
+        let mut options = SstableBuilderOptions {
             capacity,
             block_capacity: 2048,
             restart_interval: 16,
             bloom_false_positive: 0.1,
-            compression_algorithm: CompressionAlgorithm::Lz4,
+            compression_algorithm: CompressionAlgorithm::None,
         };
         let sst1 = gen_test_sstable_info(options.clone(), 1, data1, sstable_store.clone()).await;
         let sst2 = gen_test_sstable_info(options.clone(), 2, data2, sstable_store.clone()).await;
-        let sst3 = gen_test_sstable_info(options.clone(), 3, data3, sstable_store.clone()).await;
+        options.compression_algorithm = CompressionAlgorithm::Lz4;
+        let sst3 = gen_test_sstable_info(options, 3, data3, sstable_store.clone()).await;
         let read_options = Arc::new(SstableIteratorReadOptions::default());
 
         let task = CompactTask {
@@ -1436,7 +1437,12 @@ pub(crate) mod tests {
             let epoch = 400;
             let key = k.to_be_bytes().to_vec();
             let key = FullKey::new(TableId::new(1), TableKey(key), epoch);
-            let v = HummockValue::put(format!("sst1-{}", epoch).into_bytes());
+            let rand_v = rng.next_u32() % 10;
+            let v = if rand_v == 1 {
+                HummockValue::delete()
+            } else {
+                HummockValue::put(format!("sst1-{}", epoch).into_bytes())
+            };
             data1.push((key, v));
             last_k = k;
         }

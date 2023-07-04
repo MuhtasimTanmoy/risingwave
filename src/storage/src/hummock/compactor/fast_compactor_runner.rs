@@ -90,6 +90,14 @@ impl BlockStreamIterator {
         result
     }
 
+    fn init_block_iter(&mut self, buf: Bytes, uncompressed_capacity: usize) -> HummockResult<()> {
+        let block = Block::decode(buf, uncompressed_capacity)?;
+        let mut iter = BlockIterator::new(BlockHolder::from_owned_block(Box::new(block)));
+        iter.seek_to_first();
+        self.iter = Some(iter);
+        Ok(())
+    }
+
     fn next_block_smallest(&self) -> &[u8] {
         self.sstable.value().meta.block_metas[self.next_block_index]
             .smallest_key
@@ -118,7 +126,7 @@ impl BlockStreamIterator {
     }
 
     fn is_valid(&self) -> bool {
-        self.next_block_index < self.sstable.value().meta.block_metas.len()
+        self.iter.is_some() || self.next_block_index < self.sstable.value().meta.block_metas.len()
     }
 }
 
@@ -194,11 +202,11 @@ impl ConcatSstableIterator {
 
     pub async fn init_block_iter(&mut self) -> HummockResult<()> {
         if let Some(sstable) = self.sstable_iter.as_mut() {
+            if sstable.iter.is_some() {
+                return Ok(());
+            }
             let (buf, uncompressed_capacity) = sstable.download_next_block().await?.unwrap();
-            let block = Block::decode(buf, uncompressed_capacity)?;
-            let mut iter = BlockIterator::new(BlockHolder::from_owned_block(Box::new(block)));
-            iter.seek_to_first();
-            sstable.iter = Some(iter);
+            sstable.init_block_iter(buf, uncompressed_capacity)?;
         }
         Ok(())
     }
@@ -356,6 +364,14 @@ impl CompactorRunner {
                         .download_next_block()
                         .await?
                         .unwrap();
+                    let algorithm = Block::get_algorithm(&block)?;
+                    if algorithm == CompressionAlgorithm::None {
+                        first
+                            .current_sstable()
+                            .init_block_iter(block, uncompressed_size)?;
+                        break;
+                    }
+
                     let (stale_count, total_count) =
                         first.estimate_key_count(uncompressed_size as u64);
                     skip_raw_block_size += block.len() as u64;
@@ -405,6 +421,7 @@ impl CompactorRunner {
                 self.executor.run(iter, target_key).await?;
                 assert!(!iter.is_valid());
             }
+            sstable_iter.iter.take();
         }
 
         while rest_data.is_valid() {

@@ -152,6 +152,11 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn get_algorithm(buf: &Bytes) -> HummockResult<CompressionAlgorithm> {
+        let compression = CompressionAlgorithm::decode(&mut &buf[buf.len() - 9..buf.len() - 8])?;
+        Ok(compression)
+    }
+
     pub fn decode(buf: Bytes, uncompressed_capacity: usize) -> HummockResult<Self> {
         // Verify checksum.
 
