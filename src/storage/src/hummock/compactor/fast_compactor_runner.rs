@@ -344,6 +344,17 @@ impl CompactorRunner {
                     }
                     let full_key =
                         FullKey::decode(first.current_sstable().next_block_smallest()).to_vec();
+                    if self.executor.last_key_is_delete
+                        && self
+                            .executor
+                            .last_key
+                            .user_key
+                            .eq(&full_key.user_key)
+                    {
+                        // If the last key is delete tombstone, we can not append the origin block
+                        // because it would cause a deleted key could be see by user again.
+                        break;
+                    }
                     let (block, uncompressed_size) = first
                         .current_sstable()
                         .download_next_block()
@@ -446,6 +457,7 @@ pub struct CompactTaskExecutor<F: TableBuilderFactory> {
     user_key_last_delete_epoch: HummockEpoch,
     builder: CapacitySplitTableBuilder<F>,
     task_config: TaskConfig,
+    last_key_is_delete: bool,
 }
 
 impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
@@ -455,6 +467,7 @@ impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
             task_config,
             last_key: FullKey::default(),
             watermark_can_see_last_key: false,
+            last_key_is_delete: false,
             user_key_last_delete_epoch: HummockEpoch::MAX,
         }
     }
@@ -465,6 +478,7 @@ impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
         }
         self.watermark_can_see_last_key = false;
         self.user_key_last_delete_epoch = HummockEpoch::MAX;
+        self.last_key_is_delete = false;
     }
 
     pub async fn run(
@@ -482,14 +496,18 @@ impl<F: TableBuilderFactory> CompactTaskExecutor<F> {
                 self.last_key.set(iter.key());
                 self.watermark_can_see_last_key = false;
                 self.user_key_last_delete_epoch = HummockEpoch::MAX;
+                self.last_key_is_delete = false;
             }
-            if (epoch <= self.task_config.watermark
+            if epoch <= self.task_config.watermark
                 && self.task_config.gc_delete_keys
-                && value.is_delete())
-                || (epoch < self.task_config.watermark && self.watermark_can_see_last_key)
+                && value.is_delete()
             {
                 drop = true;
+                self.last_key_is_delete = true;
+            } else if epoch < self.task_config.watermark && self.watermark_can_see_last_key {
+                drop = true;
             }
+
             if epoch <= self.task_config.watermark {
                 self.watermark_can_see_last_key = true;
             }
