@@ -209,15 +209,14 @@ impl<W: SstableWriter, F: FilterBuilder> SstableBuilder<W, F> {
     /// Add kv pair to sstable.
     pub async fn add_raw_block(
         &mut self,
-        full_key: FullKey<Vec<u8>>,
+        smallest_key: Vec<u8>,
+        largest_key: Vec<u8>,
         buf: Bytes,
         uncompressed_size: usize,
         stale_key_count: u64,
         total_key_count: u64,
     ) -> HummockResult<()> {
-        let smallest_key = full_key.encode();
-        self.last_full_key.clear();
-        self.last_full_key.extend_from_slice(&smallest_key);
+        self.last_full_key = largest_key;
         if !self.block_builder.is_empty() {
             self.build_block().await?;
         }

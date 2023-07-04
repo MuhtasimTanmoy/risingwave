@@ -1331,6 +1331,7 @@ pub(crate) mod tests {
             base_level: 4,
             target_file_size: capacity as u64,
             compression_algorithm: 1,
+            gc_delete_keys: true,
             ..Default::default()
         };
         let deg = Arc::new(CompactionDeleteRanges::default());

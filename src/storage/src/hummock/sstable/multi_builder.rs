@@ -172,26 +172,12 @@ where
     pub async fn add_raw_block(
         &mut self,
         buf: Bytes,
-        full_key: FullKey<Vec<u8>>,
-        is_new_user_key: bool,
+        smallest_key: Vec<u8>,
+        largest_key: Vec<u8>,
         uncompressed_size: usize,
         stale_key_count: u64,
         total_key_count: u64,
     ) -> HummockResult<()> {
-        if self
-            .current_builder
-            .as_ref()
-            .map(|builder| is_new_user_key && builder.reach_capacity())
-            .unwrap_or(false)
-        {
-            let monotonic_deletes = self
-                .del_agg
-                .get_tombstone_between(self.last_sealed_key.as_ref(), full_key.user_key.as_ref());
-            self.seal_current(monotonic_deletes).await?;
-            self.last_sealed_key
-                .extend_from_other(&full_key.user_key.as_ref());
-        }
-
         if self.current_builder.is_none() {
             if let Some(progress) = &self.task_progress {
                 progress
@@ -205,7 +191,8 @@ where
         let builder = self.current_builder.as_mut().unwrap();
         builder
             .add_raw_block(
-                full_key,
+                smallest_key,
+                largest_key,
                 buf,
                 uncompressed_size,
                 stale_key_count,

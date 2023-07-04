@@ -114,6 +114,21 @@ impl BlockStreamIterator {
         }
     }
 
+    fn current_block_largest(&self) -> Vec<u8> {
+        if self.next_block_index < self.sstable.value().meta.block_metas.len() {
+            let mut largest_key = FullKey::decode(
+                self.sstable.value().meta.block_metas[self.next_block_index + 1]
+                    .smallest_key
+                    .as_ref(),
+            );
+            // do not include this key because it is the smallest key of next block.
+            largest_key.epoch = HummockEpoch::MAX;
+            largest_key.encode()
+        } else {
+            self.sstable.value().meta.largest_key.clone()
+        }
+    }
+
     fn key(&self) -> FullKey<&[u8]> {
         match self.iter.as_ref() {
             Some(iter) => iter.key(),
@@ -350,15 +365,22 @@ impl CompactorRunner {
                     if full_key.ge(&right_key) {
                         break;
                     }
-                    let full_key =
-                        FullKey::decode(first.current_sstable().next_block_smallest()).to_vec();
+                    let smallest_key =
+                        FullKey::decode(first.current_sstable().next_block_smallest());
                     if self.executor.last_key_is_delete
-                        && self.executor.last_key.user_key.eq(&full_key.user_key)
+                        && self
+                            .executor
+                            .last_key
+                            .user_key
+                            .as_ref()
+                            .eq(&smallest_key.user_key)
                     {
                         // If the last key is delete tombstone, we can not append the origin block
                         // because it would cause a deleted key could be see by user again.
                         break;
                     }
+                    let smallest_key = first.current_sstable().next_block_smallest().to_vec();
+
                     let (block, uncompressed_size) = first
                         .current_sstable()
                         .download_next_block()
@@ -376,12 +398,14 @@ impl CompactorRunner {
                         first.estimate_key_count(uncompressed_size as u64);
                     skip_raw_block_size += block.len() as u64;
                     skip_raw_block_count += 1;
+                    let largest_key = first.current_sstable().current_block_largest();
+
                     self.executor
                         .builder
                         .add_raw_block(
                             block,
-                            full_key,
-                            false,
+                            smallest_key,
+                            largest_key,
                             uncompressed_size,
                             stale_count,
                             total_count,
@@ -427,18 +451,19 @@ impl CompactorRunner {
         while rest_data.is_valid() {
             let mut sstable_iter = rest_data.sstable_iter.take().unwrap();
             while sstable_iter.is_valid() {
-                let full_key = FullKey::decode(sstable_iter.next_block_smallest()).to_vec();
+                let smallest_key = sstable_iter.next_block_smallest().to_vec();
                 let (block, uncompressed_size) = sstable_iter.download_next_block().await?.unwrap();
                 let (stale_count, total_count) =
                     rest_data.estimate_key_count(uncompressed_size as u64);
                 skip_raw_block_count += 1;
                 skip_raw_block_size += block.len() as u64;
+                let largest_key = sstable_iter.current_block_largest();
                 self.executor
                     .builder
                     .add_raw_block(
                         block,
-                        full_key,
-                        false,
+                        smallest_key,
+                        largest_key,
                         uncompressed_size,
                         stale_count,
                         total_count,
