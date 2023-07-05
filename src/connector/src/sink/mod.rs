@@ -18,6 +18,7 @@ pub mod kinesis;
 pub mod redis;
 pub mod remote;
 pub mod utils;
+pub mod clickhouse;
 
 use std::collections::HashMap;
 
