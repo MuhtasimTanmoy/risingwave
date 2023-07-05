@@ -81,6 +81,8 @@ pub struct StorageOpts {
     pub object_store_upload_timeout_ms: u64,
     /// object store read timeout.
     pub object_store_read_timeout_ms: u64,
+    /// enable FastCompactorRunner.
+    pub enable_fast_compaction: bool,
 }
 
 impl Default for StorageOpts {
@@ -134,6 +136,7 @@ impl From<(&RwConfig, &SystemParamsReader, &StorageMemoryConfig)> for StorageOpt
             object_store_upload_timeout_ms: c.storage.object_store_upload_timeout_ms,
             backup_storage_url: p.backup_storage_url().to_string(),
             backup_storage_directory: p.backup_storage_directory().to_string(),
+            enable_fast_compaction: c.storage.enable_fast_compaction,
         }
     }
 }

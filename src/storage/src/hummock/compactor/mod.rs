@@ -247,7 +247,8 @@ impl Compactor {
             .map(|table_info| table_info.file_size)
             .sum::<u64>();
         let mut optimize_by_copy_block = false;
-        if !has_tombstone
+        if context.storage_opts.enable_fast_compaction
+            && !has_tombstone
             && !has_ttl
             && single_table
             && compact_task.target_level > 0

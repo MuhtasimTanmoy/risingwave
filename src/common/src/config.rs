@@ -482,6 +482,9 @@ pub struct StorageConfig {
     #[serde(default = "default::storage::object_store_read_timeout_ms")]
     pub object_store_read_timeout_ms: u64,
 
+    #[serde(default = "default::storage::enable_fast_compaction")]
+    pub enable_fast_compaction: bool,
+
     #[serde(default, flatten)]
     pub unrecognized: Unrecognized<Self>,
 }
@@ -849,6 +852,10 @@ mod default {
 
         pub fn object_store_read_timeout_ms() -> u64 {
             60 * 60 * 1000
+        }
+
+        pub fn enable_fast_compaction() -> bool {
+            true
         }
     }
 
