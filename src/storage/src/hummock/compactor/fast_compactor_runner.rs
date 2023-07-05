@@ -169,6 +169,7 @@ pub struct ConcatSstableIterator {
 
     stats: StoreLocalStatistic,
     task_progress: Arc<TaskProgress>,
+    level_id: u32,
 }
 
 impl ConcatSstableIterator {
@@ -176,12 +177,14 @@ impl ConcatSstableIterator {
     /// arranged in ascending order when it serves as a forward iterator,
     /// and arranged in descending order when it serves as a backward iterator.
     pub fn new(
+        level_id: u32,
         sst_infos: Vec<SstableInfo>,
         sstable_store: SstableStoreRef,
         task_progress: Arc<TaskProgress>,
     ) -> Self {
         Self {
             sstable_iter: None,
+            level_id,
             cur_idx: 0,
             sstables: sst_infos,
             sstable_store,
@@ -268,8 +271,10 @@ pub struct CompactorRunner {
     left: Box<ConcatSstableIterator>,
     right: Box<ConcatSstableIterator>,
     task_id: u64,
+    target_level: u32,
     executor:
         CompactTaskExecutor<RemoteBuilderFactory<StreamingSstableWriterFactory, Xor8FilterBuilder>>,
+    compression_algorithm: CompressionAlgorithm,
 }
 
 impl CompactorRunner {
@@ -280,11 +285,12 @@ impl CompactorRunner {
         task_progress: Arc<TaskProgress>,
     ) -> Self {
         let mut options: SstableBuilderOptions = context.storage_opts.as_ref().into();
-        options.compression_algorithm = match task.compression_algorithm {
+        let compression_algorithm = match task.compression_algorithm {
             0 => CompressionAlgorithm::None,
             1 => CompressionAlgorithm::Lz4,
             _ => CompressionAlgorithm::Zstd,
         };
+        options.compression_algorithm = compression_algorithm;
         options.capacity = task.target_file_size as usize;
         let get_id_time = Arc::new(AtomicU64::new(0));
 
@@ -322,12 +328,15 @@ impl CompactorRunner {
             task_config.split_by_table,
             task_config.split_weight_by_vnode,
         );
+        assert_eq!(task.input_ssts.len(), 2);
         let left = Box::new(ConcatSstableIterator::new(
+            task.input_ssts[0].level_idx,
             task.input_ssts[0].table_infos.clone(),
             context.sstable_store.clone(),
             task_progress.clone(),
         ));
         let right = Box::new(ConcatSstableIterator::new(
+            task.input_ssts[1].level_idx,
             task.input_ssts[1].table_infos.clone(),
             context.sstable_store.clone(),
             task_progress.clone(),
@@ -337,7 +346,9 @@ impl CompactorRunner {
             executor: CompactTaskExecutor::new(sst_builder, task_config),
             left,
             right,
+            target_level: task.target_level,
             task_id: task.task_id,
+            compression_algorithm,
         }
     }
 
@@ -362,6 +373,8 @@ impl CompactorRunner {
                 let right_key = second.current_sstable().key();
                 while first.current_sstable().is_valid() {
                     let full_key = FullKey::decode(first.current_sstable().next_block_largest());
+                    // the full key may be either Excluded key or Included key, so we do not allow
+                    // they equals.
                     if full_key.ge(&right_key) {
                         break;
                     }
@@ -387,7 +400,10 @@ impl CompactorRunner {
                         .await?
                         .unwrap();
                     let algorithm = Block::get_algorithm(&block)?;
-                    if algorithm == CompressionAlgorithm::None {
+                    if algorithm == CompressionAlgorithm::None
+                        && algorithm != self.compression_algorithm
+                        && first.level_id != self.target_level
+                    {
                         first
                             .current_sstable()
                             .init_block_iter(block, uncompressed_size)?;
