@@ -117,7 +117,7 @@ impl BlockStreamIterator {
     fn current_block_largest(&self) -> Vec<u8> {
         if self.next_block_index < self.sstable.value().meta.block_metas.len() {
             let mut largest_key = FullKey::decode(
-                self.sstable.value().meta.block_metas[self.next_block_index + 1]
+                self.sstable.value().meta.block_metas[self.next_block_index]
                     .smallest_key
                     .as_ref(),
             );
