@@ -149,22 +149,14 @@ impl<'a> TryFrom<&'a ExprNode> for UdfExpression {
                 .collect(),
         ));
 
-        tracing::info!(?udf, "building UDF expression");
-
         let imp = match &udf.extra {
             None | Some(PbExtra::External(PbExternalUdfExtra {})) => UdfImpl::External {
                 client: get_or_create_flight_client(&udf.link)?,
                 identifier: udf.identifier.clone(),
             },
             Some(PbExtra::Wasm(PbWasmUdfExtra { module })) => {
-                use base64::prelude::{Engine, BASE64_STANDARD};
-
-                // This should be already validated in frontend
-                let module = BASE64_STANDARD
-                    .decode(module)
-                    .expect("failed to decode wasm module");
                 let wasm_engine = WasmEngine::get_or_create();
-                let component = wasm_engine.load_component(&module)?;
+                let component = wasm_engine.load_component(module)?;
                 UdfImpl::Wasm { component }
             }
         };

@@ -7,7 +7,7 @@ cd "$path"
 
 rustup target add wasm32-unknown-unknown
 
-profile=dev
+profile=release
 if [ "$profile" == "dev" ]; then
     target_dir=debug
 else

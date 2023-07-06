@@ -412,8 +412,9 @@ message ExternalUdfExtra {}
 
 // extra information for wasm functions
 message WasmUdfExtra {
-  // base64 encoded .wasm file
-  string module = 1;
+  // compiled wasmtime module
+  // TODO: Maybe we should store it in S3 instead of etcd.
+  bytes module = 1;
 }
 
 // Additional information for user defined table functions.

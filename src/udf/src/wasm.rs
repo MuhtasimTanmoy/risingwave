@@ -118,27 +118,23 @@ impl WasmEngine {
         WASM_ENGINE.clone()
     }
 
-    // TODO: pre-compile component?
     #[tracing::instrument(skip_all)]
-    pub fn load_component(&self, binary: &[u8]) -> WasmUdfResult<InstantiatedComponent> {
+    pub fn compile_component(&self, binary: &[u8]) -> WasmUdfResult<Vec<u8>> {
         // This is expensive.
         let component = Component::from_binary(&self.engine, binary)?;
         tracing::info!("wasm component loaded");
 
-        // just to take a look. playground
-        {
-            // This function is similar to the Engine::precompile_module method where it produces an
-            // artifact of Wasmtime which is suitable to later pass into Module::deserialize. If a
-            // module is never instantiated then it’s recommended to use Engine::precompile_module
-            // instead of this method, but if a module is both instantiated and serialized then this
-            // method can be useful to get the serialized version without compiling twice.
-            let serialized = component.serialize()?;
-            debug!(
-                "compile component, size: {} -> {}",
-                binary.len(),
-                serialized.len()
-            );
-        }
+        // This function is similar to the Engine::precompile_module method where it produces an
+        // artifact of Wasmtime which is suitable to later pass into Module::deserialize. If a
+        // module is never instantiated then it’s recommended to use Engine::precompile_module
+        // instead of this method, but if a module is both instantiated and serialized then this
+        // method can be useful to get the serialized version without compiling twice.
+        let serialized = component.serialize()?;
+        debug!(
+            "compile component, size: {} -> {}",
+            binary.len(),
+            serialized.len()
+        );
 
         // check the component can be instantiated
         let linker = Linker::new(&self.engine);
@@ -150,6 +146,30 @@ impl WasmEngine {
         // "main instance" that an embedding is interested in executing.
 
         // So this is cheap?
+        let mut store = Store::new(&self.engine, WasmState {});
+        let (_bindings, _instance) = component::Udf::instantiate(&mut store, &component, &linker)?;
+
+        // Ok(InstantiatedComponent {
+        //     store: Arc::new(Mutex::new(store)),
+        //     bindings,
+        //     instance,
+        // })
+        Ok(serialized)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn load_component(
+        &self,
+        serialized_component: &[u8],
+    ) -> WasmUdfResult<InstantiatedComponent> {
+        // This is fast.
+        let component = unsafe {
+            // safety: it's serialized by ourself
+            // https://docs.rs/wasmtime/latest/wasmtime/struct.Module.html#unsafety-1
+            Component::deserialize(&self.engine, serialized_component)?
+        };
+
+        let linker = Linker::new(&self.engine);
         let mut store = Store::new(&self.engine, WasmState {});
         let (bindings, instance) = component::Udf::instantiate(&mut store, &component, &linker)?;
 

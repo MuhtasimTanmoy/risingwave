@@ -10,6 +10,8 @@ cd "$path"
 echo "size of wasm: $(stat -f "%z" wit_example.wasm) bytes"
 encoded=$(base64 -i wit_example.wasm)
 echo "size of encoded wasm: ${#encoded} bytes"
+# debug:   23557258
+# release: 12457072
 
 sql="CREATE FUNCTION is_positive (x bigint) RETURNS BOOL LANGUAGE wasm_v1 USING BASE64 '$encoded';"
 echo "$sql" > create.sql

@@ -126,6 +126,8 @@ pub async fn handle_create_function(
 
     let link;
     let identifier;
+
+    // judge the type of the UDF, and do some type-specific checks correspondingly.
     let extra = match using {
         CreateFunctionUsing::Link(l) => {
             let Some(FunctionDefinition::SingleQuotedDef(id)) = params.as_ else {
@@ -133,6 +135,33 @@ pub async fn handle_create_function(
             };
             identifier = id;
             link = l;
+
+            // check UDF server
+            {
+                let client = ArrowFlightUdfClient::connect(&link)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                /// A helper function to create a unnamed field from data type.
+                fn to_field(data_type: arrow_schema::DataType) -> arrow_schema::Field {
+                    arrow_schema::Field::new("", data_type, true)
+                }
+                let args = arrow_schema::Schema::new(
+                    arg_types.iter().map(|t| to_field(t.into())).collect(),
+                );
+                let returns = arrow_schema::Schema::new(match kind {
+                    Kind::Scalar(_) => vec![to_field(return_type.clone().into())],
+                    Kind::Table(_) => vec![
+                        arrow_schema::Field::new("row_index", arrow_schema::DataType::Int32, true),
+                        to_field(return_type.clone().into()),
+                    ],
+                    _ => unreachable!(),
+                });
+                client
+                    .check(&identifier, &args, &returns)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+            }
+
             PbExtra::External(PbExternalUdfExtra {})
         }
         CreateFunctionUsing::Base64(module) => {
@@ -144,45 +173,18 @@ pub async fn handle_create_function(
                 )
                 .into());
             }
-            PbExtra::Wasm(PbWasmUdfExtra { module })
-        }
-    };
 
-    // check according to the type of the UDF
-    match &extra {
-        PbExtra::External(PbExternalUdfExtra {}) => {
-            let client = ArrowFlightUdfClient::connect(&link)
-                .await
-                .map_err(|e| anyhow!(e))?;
-            /// A helper function to create a unnamed field from data type.
-            fn to_field(data_type: arrow_schema::DataType) -> arrow_schema::Field {
-                arrow_schema::Field::new("", data_type, true)
-            }
-            let args =
-                arrow_schema::Schema::new(arg_types.iter().map(|t| to_field(t.into())).collect());
-            let returns = arrow_schema::Schema::new(match kind {
-                Kind::Scalar(_) => vec![to_field(return_type.clone().into())],
-                Kind::Table(_) => vec![
-                    arrow_schema::Field::new("row_index", arrow_schema::DataType::Int32, true),
-                    to_field(return_type.clone().into()),
-                ],
-                _ => unreachable!(),
-            });
-            client
-                .check(&identifier, &args, &returns)
-                .await
-                .map_err(|e| anyhow!(e))?;
-        }
-        PbExtra::Wasm(PbWasmUdfExtra { module }) => {
             use base64::prelude::{Engine, BASE64_STANDARD};
 
             let module = BASE64_STANDARD.decode(module).map_err(|e| anyhow!(e))?;
             let wasm_engine = WasmEngine::get_or_create();
-            let _component = wasm_engine
-                .load_component(&module)
+            let component = wasm_engine
+                .compile_component(&module)
                 .map_err(|e| anyhow!(e))?;
+
+            PbExtra::Wasm(PbWasmUdfExtra { module: component })
         }
-    }
+    };
 
     let function = Function {
         id: FunctionId::placeholder().0,
