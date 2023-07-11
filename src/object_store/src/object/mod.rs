@@ -42,7 +42,7 @@ type BoxedStreamingUploader = Box<dyn StreamingUploader>;
 
 /// Partitions a set of given paths into two vectors. The first vector contains all local paths, and
 /// the second contains all remote paths.
-pub fn partition_object_store_paths(paths: &[String]) -> Vec<String> {
+fn partition_object_store_paths(paths: &[String]) -> Vec<String> {
     // ToDo: Currently the result is a copy of the input. Would it be worth it to use an in-place
     //       partition instead?
     let mut vec_rem = vec![];

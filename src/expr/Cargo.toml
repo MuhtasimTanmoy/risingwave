@@ -41,6 +41,7 @@ paste = "1"
 regex = "1"
 risingwave_common = { path = "../common" }
 risingwave_expr_macro = { path = "macro" }
+risingwave_object_store = { path = "../object_store" }
 risingwave_pb = { path = "../prost" }
 risingwave_udf = { path = "../udf" }
 rust_decimal = { version = "1", features = ["db-postgres", "maths"] }

@@ -637,6 +637,9 @@ pub struct SystemConfig {
 
     #[serde(default = "default::system::telemetry_enabled")]
     pub telemetry_enabled: Option<bool>,
+
+    #[serde(default = "default::system::wasm_storage_url")]
+    pub wasm_storage_url: Option<String>,
 }
 
 impl SystemConfig {
@@ -652,6 +655,7 @@ impl SystemConfig {
             backup_storage_url: self.backup_storage_url,
             backup_storage_directory: self.backup_storage_directory,
             telemetry_enabled: self.telemetry_enabled,
+            wasm_storage_url: self.wasm_storage_url,
         }
     }
 }
@@ -977,6 +981,10 @@ mod default {
 
         pub fn telemetry_enabled() -> Option<bool> {
             system_param::default::telemetry_enabled()
+        }
+
+        pub fn wasm_storage_url() -> Option<String> {
+            system_param::default::wasm_storage_url()
         }
     }
 

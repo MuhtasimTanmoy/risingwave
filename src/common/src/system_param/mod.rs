@@ -54,6 +54,7 @@ macro_rules! for_all_undeprecated_params {
             { backup_storage_url, String, Some("memory".to_string()), false },
             { backup_storage_directory, String, Some("backup".to_string()), false },
             { telemetry_enabled, bool, Some(true), true },
+            { wasm_storage_url, String, Some("memory".to_string()), false },
             $({ $field, $type, $default },)*
         }
     };
