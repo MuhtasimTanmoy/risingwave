@@ -93,7 +93,8 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
             pk_indices.clone(),
             sink_type,
             sink_id,
-        )?;
+        )
+        .await?;
         let schema: Schema = columns
             .iter()
             .map(|column| column.column_desc.clone().into())
@@ -215,7 +216,7 @@ impl<F: LogStoreFactory> SinkExecutor<F> {
     }
 
     async fn execute_consume_log<S: Sink, R: LogReader>(
-        sink: S,
+        mut sink: S,
         mut log_reader: R,
         sink_metrics: SinkMetrics,
         sink_writer_param: SinkWriterParam,

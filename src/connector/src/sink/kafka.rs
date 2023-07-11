@@ -169,7 +169,7 @@ impl Sink for KafkaSink {
     type Coordinator = DummySinkCommitCoordinator;
     type Writer = SinkWriterV1Adapter<KafkaSinkWriter>;
 
-    async fn new_writer(&self, writer_param: SinkWriterParam) -> Result<Self::Writer> {
+    async fn new_writer(&mut self, writer_param: SinkWriterParam) -> Result<Self::Writer> {
         Ok(SinkWriterV1Adapter::new(
             KafkaSinkWriter::new(
                 self.config.clone(),

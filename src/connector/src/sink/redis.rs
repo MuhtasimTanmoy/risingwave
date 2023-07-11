@@ -36,7 +36,7 @@ impl Sink for RedisSink {
     type Coordinator = DummySinkCommitCoordinator;
     type Writer = RedisSinkWriter;
 
-    async fn new_writer(&self, _writer_env: SinkWriterParam) -> Result<Self::Writer> {
+    async fn new_writer(&mut self, _writer_env: SinkWriterParam) -> Result<Self::Writer> {
         todo!()
     }
 

@@ -93,7 +93,7 @@ impl Sink for KinesisSink {
         Ok(())
     }
 
-    async fn new_writer(&self, _writer_env: SinkWriterParam) -> Result<Self::Writer> {
+    async fn new_writer(&mut self, _writer_env: SinkWriterParam) -> Result<Self::Writer> {
         KinesisSinkWriter::new(
             self.config.clone(),
             self.schema.clone(),

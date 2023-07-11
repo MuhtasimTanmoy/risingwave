@@ -111,7 +111,7 @@ impl Sink for RemoteSink {
     type Coordinator = DummySinkCommitCoordinator;
     type Writer = SinkWriterV1Adapter<RemoteSinkWriter>;
 
-    async fn new_writer(&self, writer_param: SinkWriterParam) -> Result<Self::Writer> {
+    async fn new_writer(&mut self, writer_param: SinkWriterParam) -> Result<Self::Writer> {
         Ok(SinkWriterV1Adapter::new(
             RemoteSinkWriter::new(
                 self.config.clone(),

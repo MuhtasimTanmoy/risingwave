@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod catalog;
+pub mod iceberg;
 pub mod kafka;
 pub mod kinesis;
 pub mod redis;
@@ -41,7 +42,9 @@ use thiserror::Error;
 pub use tracing;
 
 use self::catalog::SinkType;
+use self::iceberg::{IcebergConfig, IcebergSink};
 use crate::sink::catalog::SinkId;
+use crate::sink::iceberg::ICEBERG_SINK;
 use crate::sink::kafka::{KafkaConfig, KafkaSink, KAFKA_SINK};
 use crate::sink::kinesis::{KinesisSink, KinesisSinkConfig, KINESIS_SINK};
 use crate::sink::redis::{RedisConfig, RedisSink};
@@ -67,7 +70,7 @@ pub trait Sink {
     type Coordinator: SinkCommitCoordinator;
 
     async fn validate(&self, connector_rpc_endpoint: Option<String>) -> Result<()>;
-    async fn new_writer(&self, writer_param: SinkWriterParam) -> Result<Self::Writer>;
+    async fn new_writer(&mut self, writer_param: SinkWriterParam) -> Result<Self::Writer>;
     async fn new_coordinator(
         &self,
         _connector_rpc_endpoint: Option<String>,
@@ -192,6 +195,7 @@ pub enum SinkConfig {
     Kafka(Box<KafkaConfig>),
     Remote(RemoteConfig),
     Kinesis(Box<KinesisSinkConfig>),
+    Iceberg(IcebergConfig),
     BlackHole,
 }
 
@@ -205,7 +209,7 @@ impl Sink for BlackHoleSink {
     type Coordinator = DummySinkCommitCoordinator;
     type Writer = Self;
 
-    async fn new_writer(&self, _writer_env: SinkWriterParam) -> Result<Self::Writer> {
+    async fn new_writer(&mut self, _writer_env: SinkWriterParam) -> Result<Self::Writer> {
         Ok(Self)
     }
 
@@ -258,22 +262,26 @@ impl SinkConfig {
                 KinesisSinkConfig::from_hashmap(properties)?,
             ))),
             BLACKHOLE_SINK => Ok(SinkConfig::BlackHole),
+            ICEBERG_SINK => Ok(SinkConfig::Iceberg(IcebergConfig::from_hashmap(
+                properties,
+            )?)),
             _ => Ok(SinkConfig::Remote(RemoteConfig::from_hashmap(properties)?)),
         }
     }
 
     pub fn get_connector(&self) -> &'static str {
         match self {
-            SinkConfig::Kafka(_) => "kafka",
+            SinkConfig::Kafka(_) => KAFKA_SINK,
             SinkConfig::Redis(_) => "redis",
             SinkConfig::Remote(_) => "remote",
-            SinkConfig::BlackHole => "blackhole",
-            SinkConfig::Kinesis(_) => "kinesis",
+            SinkConfig::BlackHole => BLACKHOLE_SINK,
+            SinkConfig::Kinesis(_) => KINESIS_SINK,
+            SinkConfig::Iceberg(_) => ICEBERG_SINK,
         }
     }
 }
 
-pub fn build_sink(
+pub async fn build_sink(
     config: SinkConfig,
     columns: &[ColumnCatalog],
     pk_indices: Vec<usize>,
@@ -285,7 +293,7 @@ pub fn build_sink(
         .iter()
         .filter_map(|column| (!column.is_hidden).then(|| column.column_desc.clone().into()))
         .collect();
-    SinkImpl::new(config, schema, pk_indices, sink_type, sink_id)
+    SinkImpl::new(config, schema, pk_indices, sink_type, sink_id).await
 }
 
 #[derive(Debug)]
@@ -295,6 +303,7 @@ pub enum SinkImpl {
     Remote(RemoteSink),
     BlackHole(BlackHoleSink),
     Kinesis(KinesisSink),
+    Iceberg(IcebergSink),
 }
 
 #[macro_export]
@@ -308,12 +317,13 @@ macro_rules! dispatch_sink {
             SinkImpl::Remote($sink) => $body,
             SinkImpl::BlackHole($sink) => $body,
             SinkImpl::Kinesis($sink) => $body,
+            SinkImpl::Iceberg($sink) => $body,
         }
     }};
 }
 
 impl SinkImpl {
-    pub fn new(
+    pub async fn new(
         cfg: SinkConfig,
         schema: Schema,
         pk_indices: Vec<usize>,
@@ -338,6 +348,7 @@ impl SinkImpl {
                 SinkImpl::Remote(RemoteSink::new(cfg, schema, pk_indices, sink_id, sink_type))
             }
             SinkConfig::BlackHole => SinkImpl::BlackHole(BlackHoleSink),
+            SinkConfig::Iceberg(cfg) => SinkImpl::Iceberg(IcebergSink::new(cfg, schema).await?),
         })
     }
 }
@@ -354,6 +365,8 @@ pub enum SinkError {
     Remote(String),
     #[error("Json parse error: {0}")]
     JsonParse(String),
+    #[error("Iceberg error: {0}")]
+    Iceberg(String),
     #[error("config error: {0}")]
     Config(#[from] anyhow::Error),
     #[error("coordinator error: {0}")]
