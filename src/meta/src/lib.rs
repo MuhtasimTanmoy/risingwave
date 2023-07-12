@@ -34,6 +34,7 @@
 #![feature(is_sorted)]
 #![feature(string_leak)]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(type_name_of_val)]
 
 pub mod backup_restore;
 mod barrier;
@@ -42,7 +43,7 @@ mod dashboard;
 mod error;
 pub mod hummock;
 pub mod manager;
-mod model;
+pub mod model;
 mod rpc;
 pub(crate) mod serving;
 pub mod storage;

@@ -141,7 +141,12 @@ static GENERAL_UNNESTING_TRANS_APPLY_WITH_SHARE: LazyLock<OptimizationStage> =
     LazyLock::new(|| {
         OptimizationStage::new(
             "General Unnesting(Translate Apply)",
-            vec![TranslateApplyRule::create(true)],
+            vec![
+                TranslateApplyRule::create(true),
+                // Separate the project from a join if necessary because `ApplyJoinTransposeRule`
+                // can't handle a join with `output_indices`.
+                ProjectJoinSeparateRule::create(),
+            ],
             ApplyOrder::BottomUp,
         )
     });
@@ -150,7 +155,12 @@ static GENERAL_UNNESTING_TRANS_APPLY_WITHOUT_SHARE: LazyLock<OptimizationStage> 
     LazyLock::new(|| {
         OptimizationStage::new(
             "General Unnesting(Translate Apply)",
-            vec![TranslateApplyRule::create(false)],
+            vec![
+                TranslateApplyRule::create(false),
+                // Separate the project from a join if necessary because `ApplyJoinTransposeRule`
+                // can't handle a join with `output_indices`.
+                ProjectJoinSeparateRule::create(),
+            ],
             ApplyOrder::BottomUp,
         )
     });
@@ -328,6 +338,14 @@ static SET_OPERATION_TO_JOIN: LazyLock<OptimizationStage> = LazyLock::new(|| {
     )
 });
 
+static GROUPING_SETS: LazyLock<OptimizationStage> = LazyLock::new(|| {
+    OptimizationStage::new(
+        "Grouping Sets",
+        vec![GroupingSetsToExpandRule::create()],
+        ApplyOrder::BottomUp,
+    )
+});
+
 impl LogicalOptimizer {
     pub fn predicate_pushdown(
         plan: PlanRef,
@@ -430,6 +448,8 @@ impl LogicalOptimizer {
             ctx.trace(plan.explain_to_string());
         }
 
+        // Convert grouping sets at first because other agg rule can't handle grouping sets.
+        plan = plan.optimize_by_rules(&GROUPING_SETS);
         // Remove project to make common sub-plan sharing easier.
         plan = plan.optimize_by_rules(&PROJECT_REMOVE);
 
@@ -457,7 +477,6 @@ impl LogicalOptimizer {
                 ctx.trace(plan.explain_to_string());
             }
         }
-
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE);
         plan = plan.optimize_by_rules(&SET_OPERATION_TO_JOIN);
 
@@ -541,6 +560,7 @@ impl LogicalOptimizer {
         // Convert the dag back to the tree, because we don't support DAG plan for batch.
         plan = plan.optimize_by_rules(&DAG_TO_TREE);
 
+        plan = plan.optimize_by_rules(&GROUPING_SETS);
         plan = plan.optimize_by_rules(&REWRITE_LIKE_EXPR);
         plan = plan.optimize_by_rules(&SET_OPERATION_MERGE);
         plan = plan.optimize_by_rules(&SET_OPERATION_TO_JOIN);
