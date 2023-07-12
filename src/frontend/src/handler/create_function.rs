@@ -25,6 +25,7 @@ use risingwave_sqlparser::ast::{
 };
 use risingwave_udf::wasm::WasmEngine;
 use risingwave_udf::ArrowFlightUdfClient;
+use tracing::Instrument;
 
 use super::*;
 use crate::catalog::CatalogError;
@@ -166,7 +167,7 @@ pub async fn handle_create_function(
         }
         CreateFunctionUsing::Base64(module) => {
             link = String::new();
-            identifier = String::new();
+            identifier = format!("{}.{}.{}", database_id, schema_id, function_name);
             if language != "wasm_v1" {
                 return Err(ErrorCode::InvalidParameterValue(
                     "LANGUAGE should be wasm_v1 for USING base64".to_string(),
@@ -175,14 +176,21 @@ pub async fn handle_create_function(
             }
 
             use base64::prelude::{Engine, BASE64_STANDARD};
-
             let module = BASE64_STANDARD.decode(module).map_err(|e| anyhow!(e))?;
+
+            let system_params = session.env().meta_client().get_system_params().await?;
+            let wasm_storage_url = system_params.wasm_storage_url();
+
             let wasm_engine = WasmEngine::get_or_create();
-            let component = wasm_engine
-                .compile_component(&module)
+            wasm_engine
+                .compile_and_upload_component(module, wasm_storage_url, &identifier)
+                .instrument(tracing::info_span!("compile_and_upload_component", %identifier))
+                .await
                 .map_err(|e| anyhow!(e))?;
 
-            PbExtra::Wasm(PbWasmUdfExtra { module: component })
+            PbExtra::Wasm(PbWasmUdfExtra {
+                wasm_storage_url: wasm_storage_url.to_string(),
+            })
         }
     };
 

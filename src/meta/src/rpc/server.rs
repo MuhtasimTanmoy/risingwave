@@ -28,6 +28,8 @@ use risingwave_common::telemetry::manager::TelemetryManager;
 use risingwave_common::telemetry::telemetry_env_enabled;
 use risingwave_common_service::metrics_manager::MetricsManager;
 use risingwave_common_service::tracing::TracingExtractLayer;
+use risingwave_object_store::object::object_metrics::ObjectStoreMetrics;
+use risingwave_object_store::object::parse_remote_object_store;
 use risingwave_pb::backup_service::backup_service_server::BackupServiceServer;
 use risingwave_pb::ddl_service::ddl_service_server::DdlServiceServer;
 use risingwave_pb::health::health_server::HealthServer;
@@ -485,6 +487,15 @@ pub async fn start_service_as_election_leader<S: MetaStore>(
         backup_manager.clone(),
         compactor_manager.clone(),
     ));
+    // Just validates the URL is valid. Panics if not.
+    let _wasm_object_store = Arc::new(
+        parse_remote_object_store(
+            system_params_reader.wasm_storage_url(),
+            Arc::new(ObjectStoreMetrics::unused()),
+            "Wasm Engine",
+        )
+        .await,
+    );
 
     let mut aws_cli = None;
     if let Some(my_vpc_id) = &env.opts.vpc_id

@@ -849,6 +849,11 @@ impl<OS: ObjectStore> MonitoredObjectStore<OS> {
     }
 }
 
+/// Creates a new [`ObjectStore`] from the given `url`. Credentials are configured via environment
+/// variables.
+///
+/// # Panics
+/// If the `url` is invalid. Therefore, it is only suitable to be used during startup.
 pub async fn parse_remote_object_store(
     url: &str,
     metrics: Arc<ObjectStoreMetrics>,

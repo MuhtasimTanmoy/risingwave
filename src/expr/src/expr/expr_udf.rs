@@ -25,6 +25,7 @@ use risingwave_pb::expr::user_defined_function::PbExtra;
 use risingwave_pb::expr::{ExprNode, PbExternalUdfExtra, PbWasmUdfExtra};
 use risingwave_udf::wasm::{InstantiatedComponent, WasmEngine};
 use risingwave_udf::ArrowFlightUdfClient;
+use tracing::Instrument;
 
 use super::{build_from_prost, BoxedExpression};
 use crate::expr::Expression;
@@ -154,9 +155,14 @@ impl<'a> TryFrom<&'a ExprNode> for UdfExpression {
                 client: get_or_create_flight_client(&udf.link)?,
                 identifier: udf.identifier.clone(),
             },
-            Some(PbExtra::Wasm(PbWasmUdfExtra { module })) => {
+            Some(PbExtra::Wasm(PbWasmUdfExtra { wasm_storage_url })) => {
                 let wasm_engine = WasmEngine::get_or_create();
-                let component = wasm_engine.load_component(module)?;
+                let component = futures::executor::block_on({
+                    wasm_engine
+                        .load_component(wasm_storage_url, &udf.identifier)
+                        .instrument(tracing::info_span!("load_component", %udf.identifier))
+                })?;
+
                 UdfImpl::Wasm { component }
             }
         };

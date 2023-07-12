@@ -17,8 +17,10 @@ arrow-ipc = "36"
 arrow-schema = "36"
 arrow-select = "36"
 base64 = "0.21"
+bytes = "1.4"
 futures-util = "0.3.25"
 itertools = "0.10"
+risingwave_object_store = { path = "../object_store" }
 thiserror = "1"
 tokio = { version = "0.2", package = "madsim-tokio", features = [
     "rt",

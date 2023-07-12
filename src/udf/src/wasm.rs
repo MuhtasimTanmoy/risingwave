@@ -16,7 +16,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use itertools::Itertools;
+use risingwave_object_store::object::object_metrics::ObjectStoreMetrics;
+use risingwave_object_store::object::{parse_remote_object_store, ObjectStoreImpl};
 use tracing::debug;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Store};
@@ -118,10 +121,20 @@ impl WasmEngine {
         WASM_ENGINE.clone()
     }
 
-    #[tracing::instrument(skip_all)]
-    pub fn compile_component(&self, binary: &[u8]) -> WasmUdfResult<Vec<u8>> {
+    pub async fn compile_and_upload_component(
+        &self,
+        binary: Vec<u8>,
+        wasm_storage_url: &str,
+        identifier: &str,
+    ) -> WasmUdfResult<()> {
+        let object_store = get_wasm_storage(wasm_storage_url).await?;
+        let binary: Bytes = binary.into();
+        object_store
+            .upload(&raw_path(identifier), binary.clone())
+            .await?;
+
         // This is expensive.
-        let component = Component::from_binary(&self.engine, binary)?;
+        let component = Component::from_binary(&self.engine, &binary[..])?;
         tracing::info!("wasm component loaded");
 
         // This function is similar to the Engine::precompile_module method where it produces an
@@ -149,19 +162,26 @@ impl WasmEngine {
         let mut store = Store::new(&self.engine, WasmState {});
         let (_bindings, _instance) = component::Udf::instantiate(&mut store, &component, &linker)?;
 
-        // Ok(InstantiatedComponent {
-        //     store: Arc::new(Mutex::new(store)),
-        //     bindings,
-        //     instance,
-        // })
-        Ok(serialized)
+        object_store
+            .upload(&compiled_path(identifier), serialized.into())
+            .await?;
+
+        tracing::debug!(
+            path = compiled_path(identifier),
+            "wasm component compiled and uploaded",
+        );
+
+        Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
-    pub fn load_component(
+    pub async fn load_component(
         &self,
-        serialized_component: &[u8],
+        wasm_storage_url: &str,
+        identifier: &str,
     ) -> WasmUdfResult<InstantiatedComponent> {
+        let object_store = get_wasm_storage(wasm_storage_url).await?;
+        let serialized_component = object_store.read(&compiled_path(identifier), None).await?;
+
         // This is fast.
         let component = unsafe {
             // safety: it's serialized by ourself
@@ -193,4 +213,36 @@ pub enum WasmUdfError {
     Eval(#[from] component::EvalErrno),
     #[error("{0}")]
     Encoding(String),
+    #[error("object store error: {0}")]
+    ObjectStore(#[from] risingwave_object_store::object::ObjectError),
+    #[error("object store error: {0}")]
+    ObjectStore1(String),
+}
+
+const WASM_RAW_MODULE_DIR: &str = "wasm/raw";
+const WASM_COMPILED_MODULE_DIR: &str = "wasm/compiled";
+
+fn raw_path(identifier: &str) -> String {
+    format!("{}/{}", WASM_RAW_MODULE_DIR, identifier)
+}
+
+fn compiled_path(identifier: &str) -> String {
+    format!("{}/{}", WASM_COMPILED_MODULE_DIR, identifier)
+}
+
+async fn get_wasm_storage(wasm_storage_url: &str) -> WasmUdfResult<ObjectStoreImpl> {
+    if wasm_storage_url.starts_with("memory") {
+        // because we create a new store every time...
+        return Err(WasmUdfError::ObjectStore1(
+            "memory storage is not supported".to_string(),
+        ));
+    }
+    // Note: it will panic if the url is invalid. We did a validation on meta startup.
+    let object_store = parse_remote_object_store(
+        wasm_storage_url,
+        Arc::new(ObjectStoreMetrics::unused()),
+        "Wasm Engine",
+    )
+    .await;
+    Ok(object_store)
 }

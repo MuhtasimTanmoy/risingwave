@@ -399,6 +399,10 @@ message UserDefinedFunction {
   string language = 4;
   // external function service only
   string link = 5;
+  // An unique identifier for the function. Different kinds of UDF may handle this field differently.
+  // - For external UDF, it's the name of the function in the external function service. 
+  //   It doesn't need to be unique across different external function servers.
+  // - For wasm UDF, it's the name of the function stored in remote object store, and needs to be globally unique.
   string identifier = 6;
 
   oneof extra {
@@ -412,9 +416,9 @@ message ExternalUdfExtra {}
 
 // extra information for wasm functions
 message WasmUdfExtra {
-  // compiled wasmtime module
-  // TODO: Maybe we should store it in S3 instead of etcd.
-  bytes module = 1;
+  // We store the url of the remote object store here, as it's inconvenient to pass it to build expr.
+  // Maybe we can deprecate it in the future.
+  string wasm_storage_url = 1;
 }
 
 // Additional information for user defined table functions.
