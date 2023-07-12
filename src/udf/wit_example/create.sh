@@ -18,8 +18,7 @@ echo "$sql" > create.sql
 psql -h localhost -p 4566 -d dev -U root -f ./create.sql
 
 # test
-# FIXME: can we let int work? (auto type conversion)
-# FIXME: very slow now.
+# FIXME: can we let int work? (auto type conversion) https://github.com/risingwavelabs/risingwave/issues/9998
 psql -h localhost -p 4566 -d dev -U root -c "SELECT is_positive(1::bigint);"
 psql -h localhost -p 4566 -d dev -U root -c "SELECT is_positive(0::bigint);"
 psql -h localhost -p 4566 -d dev -U root -c "SELECT is_positive(-1::bigint);"
