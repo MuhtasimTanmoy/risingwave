@@ -204,6 +204,10 @@ impl Date {
         ))
     }
 
+    pub fn get_nums_days(&self) -> i32{
+        self.0.num_days_from_ce()
+    }
+
     pub fn to_protobuf<T: Write>(self, output: &mut T) -> ArrayResult<usize> {
         output
             .write(&(self.0.num_days_from_ce()).to_be_bytes())
@@ -296,6 +300,9 @@ impl Timestamp {
         output
             .write(&(self.0.timestamp_micros()).to_be_bytes())
             .map_err(Into::into)
+    }
+    pub fn get_timestamp_micros(&self) -> i64{
+        self.0.timestamp_micros() 
     }
 
     pub fn with_micros(timestamp_micros: i64) -> Result<Self> {

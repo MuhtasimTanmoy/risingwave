@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::mem;
 use std::collections::HashMap;
 
 use anyhow::anyhow;
 use clickhouse::Client;
 use futures_async_stream::for_await;
+use risingwave_common::row::Row;
+use risingwave_common::types::{DatumRef, ScalarRefImpl};
 use serde_json::Value;
 use crate::common::ClickHouseCommon;
 use serde_with::serde_as;
@@ -26,10 +29,11 @@ use crate::sink::{
     Result, Sink, SinkError, SINK_TYPE_APPEND_ONLY, SINK_TYPE_DEBEZIUM, SINK_TYPE_OPTION,
     SINK_TYPE_UPSERT,
 };
-use risingwave_common::array::StreamChunk;
+use risingwave_common::array::{StreamChunk, RowRef, Op};
 use risingwave_common::catalog::Schema;
 use core::fmt::Debug;
-use clickhouse::Row;
+use clickhouse::Row as ClickHouseRow;
+use bytes::{BytesMut, BufMut};
 
 use super::utils::{gen_append_only_message_stream, AppendOnlyAdapterOpts};
 
@@ -50,6 +54,7 @@ pub struct ClickHouseSink<const APPEND_ONLY: bool> {
     schema: Schema,
     pk_indices: Vec<usize>,
     client: Client,
+    buffer: BytesMut,
 }
 
 impl ClickHouseConfig{
@@ -70,115 +75,7 @@ impl ClickHouseConfig{
         Ok(config)
     }
 }
-// impl<const APPEND_ONLY: bool> KinesisSink<APPEND_ONLY> {
-//     pub async fn new(
-//         config: KinesisSinkConfig,
-//         schema: Schema,
-//         pk_indices: Vec<usize>,
-//     ) -> Result<Self> {
-//         let client = config
-//             .common
-//             .build_client()
-//             .await
-//             .map_err(SinkError::Kinesis)?;
-//         Ok(Self {
-//             config,
-//             schema,
-//             pk_indices,
-//             client,
-//         })
-//     }
 
-//     pub async fn validate(config: KinesisSinkConfig, pk_indices: Vec<usize>) -> Result<()> {
-//         // For upsert Kafka sink, the primary key must be defined.
-//         if !APPEND_ONLY && pk_indices.is_empty() {
-//             return Err(SinkError::Config(anyhow!(
-//                 "primary key not defined for {} kafka sink (please define in `primary_key` field)",
-//                 config.r#type
-//             )));
-//         }
-
-//         // check reachability
-//         let client = config.common.build_client().await?;
-//         client
-//             .list_shards()
-//             .stream_name(&config.common.stream_name)
-//             .send()
-//             .await
-//             .map_err(|e| {
-//                 tracing::warn!("failed to list shards: {}", DisplayErrorContext(&e));
-//                 SinkError::Kinesis(anyhow!("failed to list shards: {}", DisplayErrorContext(e)))
-//             })?;
-//         Ok(())
-//     }
-
-//     async fn put_record(&self, key: &str, payload: Blob) -> Result<PutRecordOutput> {
-//         // todo: switch to put_records() for batching
-//         Retry::spawn(
-//             ExponentialBackoff::from_millis(100).map(jitter).take(3),
-//             || async {
-//                 self.client
-//                     .put_record()
-//                     .stream_name(&self.config.common.stream_name)
-//                     .partition_key(key)
-//                     .data(payload.clone())
-//                     .send()
-//                     .await
-//             },
-//         )
-//         .await
-//         .map_err(|e| {
-//             tracing::warn!(
-//                 "failed to put record: {} to {}",
-//                 DisplayErrorContext(&e),
-//                 self.config.common.stream_name
-//             );
-//             SinkError::Kinesis(anyhow!(
-//                 "failed to put record: {} to {}",
-//                 DisplayErrorContext(e),
-//                 self.config.common.stream_name
-//             ))
-//         })
-//     }
-
-//     async fn upsert(&self, chunk: StreamChunk) -> Result<()> {
-//         let upsert_stream = gen_upsert_message_stream(
-//             &self.schema,
-//             &self.pk_indices,
-//             chunk,
-//             UpsertAdapterOpts::default(),
-//         );
-
-//         crate::impl_load_stream_write_record!(upsert_stream, self.put_record);
-//         Ok(())
-//     }
-
-//     async fn append_only(&self, chunk: StreamChunk) -> Result<()> {
-//         let append_only_stream = gen_append_only_message_stream(
-//             &self.schema,
-//             &self.pk_indices,
-//             chunk,
-//             AppendOnlyAdapterOpts::default(),
-//         );
-
-//         crate::impl_load_stream_write_record!(append_only_stream, self.put_record);
-//         Ok(())
-//     }
-
-//     async fn debezium_update(&self, chunk: StreamChunk, ts_ms: u64) -> Result<()> {
-//         let dbz_stream = gen_debezium_message_stream(
-//             &self.schema,
-//             &self.pk_indices,
-//             chunk,
-//             ts_ms,
-//             DebeziumAdapterOpts::default(),
-//         );
-
-//         crate::impl_load_stream_write_record!(dbz_stream, self.put_record);
-
-//         Ok(())
-//     }
-// }
 impl<const APPEND_ONLY: bool> ClickHouseSink<APPEND_ONLY> {
     pub async fn new(
             config: ClickHouseConfig,
@@ -190,11 +87,13 @@ impl<const APPEND_ONLY: bool> ClickHouseSink<APPEND_ONLY> {
                 .build_client()
                 .await
                 .map_err(SinkError::Kinesis)?;
+            let buffer_size = client.get_buffer_size();
             Ok(Self {
                 config,
                 schema,
                 pk_indices,
                 client,
+                buffer: BytesMut::with_capacity(buffer_size),
             })
     }
     pub async fn validate(config: ClickHouseConfig, pk_indices: Vec<usize>) -> Result<()> {
@@ -212,56 +111,96 @@ impl<const APPEND_ONLY: bool> ClickHouseSink<APPEND_ONLY> {
         Ok(())
     }   
 
-    async fn append_only(&self, chunk: StreamChunk) -> Result<()> {
-        let append_only_stream = gen_append_only_message_stream(
-            &self.schema,
-            &self.pk_indices,
-            chunk,
-            AppendOnlyAdapterOpts::default(),
-        );
-
-        #[for_await]
-        for msg in append_only_stream {
-            let (event_key_object, event_object) = msg?;
-            self.load_stream_write_record(event_object,&self.schema)
-                .await?;
+    async fn append_only(&mut self, chunk: StreamChunk) -> Result<()> {
+        let mut inter = self.client.insert::<Rows>(&self.config.common.table).map_err(|e|SinkError::JsonParse(e.to_string()))?;
+        for (op,row) in chunk.rows(){
+            if op != Op::Insert {
+                continue;
+            }
+            self.build_row_binary(row);
+            let buffer = mem::replace(&mut self.buffer,BytesMut::with_capacity(self.client.get_buffer_size()));
+            inter.write_row_binary(buffer).await.map_err(|e|SinkError::JsonParse(e.to_string()))?;
         }
+        inter.end().await.map_err(|e|SinkError::JsonParse(e.to_string()))?;
         Ok(())
     }
 
-    async fn load_stream_write_record( &self,
-        event_object: Option<Value>,
-    schema: &Schema) -> Result<()>{
-            let mut insert = self.client.insert::<Rows>(&self.config.common.table.as_str())
-            .map_err(|e| SinkError::JsonParse(e.to_string()))?;
-            let rows = Rows{
-                schema,
-                event_object,
-            };
-            insert.write(&rows).await.map_err(|e| SinkError::JsonParse(e.to_string()))?;
-            Ok(())
+    fn build_row_binary(&mut self, row : RowRef<'_>) {
+        for i in row.iter(){
+            self.build_data_binary(i.unwrap())
+        }
     }
 
-}
-#[derive(Row)]
-struct Rows<'a>{
-    schema: &'a Schema,
-    event_object: Option<Value>,
-}
-impl Serialize for Rows<'_>{
 
-    
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer, 
-    {
-            let mut s = serializer.serialize_struct("rows", self.schema.len())?;
-            if let Some(Value::Object(a1)) = &self.event_object{
-                for (_,value) in a1.iter(){
-                    s.serialize_field("",&value)?;
+    fn build_data_binary(&mut self,data: ScalarRefImpl<'_>){
+        match data{
+            ScalarRefImpl::Int16(v) => self.buffer.put_i16_le(v),
+            ScalarRefImpl::Int32(v) => self.buffer.put_i32_le(v),
+            ScalarRefImpl::Int64(v) => self.buffer.put_i64_le(v),
+            ScalarRefImpl::Int256(v) => todo!(),
+            ScalarRefImpl::Serial(v) => todo!(),
+            ScalarRefImpl::Float32(v) => self.buffer.put_f32_le(v.into_inner()),
+            ScalarRefImpl::Float64(v) => self.buffer.put_f64_le(v.into_inner()),
+            ScalarRefImpl::Utf8(v) => {
+                Self::put_unsigned_leb128(&mut self.buffer, v.len() as u64);
+                self.buffer.put_slice(v.as_bytes());
+            },
+            ScalarRefImpl::Bool(v) => self.buffer.put_u8(v as _),
+            ScalarRefImpl::Decimal(v) => todo!(),
+            ScalarRefImpl::Interval(v) => todo!(),
+            ScalarRefImpl::Date(v) => {
+                let days = v.get_nums_days();
+                self.buffer.put_i32_le(days);
+            },
+            ScalarRefImpl::Time(v) => todo!(),
+            ScalarRefImpl::Timestamp(v) => {
+                let micros = v.get_timestamp_micros();
+                self.buffer.put_i64_le(micros);
+            },
+            ScalarRefImpl::Timestamptz(v) => todo!(),
+            ScalarRefImpl::Jsonb(v) => todo!(),
+            ScalarRefImpl::Struct(v) => todo!(),
+            ScalarRefImpl::List(v) => {
+                Self::put_unsigned_leb128(&mut self.buffer, v.len() as u64);
+                for i in v.iter(){
+                    if let Some(date) = i{
+                        self.build_data_binary(date);
+                    }
                 }
-            }
-            s.end()
+            },
+            ScalarRefImpl::Bytea(v) => todo!(),
+        }
     }
+    fn put_unsigned_leb128(mut buffer: impl BufMut, mut value: u64) {
+        while {
+            let mut byte = value as u8 & 0x7f;
+            value >>= 7;
+    
+            if value != 0 {
+                byte |= 0x80;
+            }
+    
+            buffer.put_u8(byte);
+    
+            value != 0
+        } {}
+    }
+
+    // async fn load_stream_write_record( &self,
+    //     event_object: Option<Value>,
+    // schema: &Schema) -> Result<()>{
+    //         let mut insert = self.client.insert::<Rows>(&self.config.common.table.as_str())
+    //         .map_err(|e| SinkError::JsonParse(e.to_string()))?;
+    //         let rows = Rows{
+    //             schema,
+    //             event_object,
+    //         };
+    //         insert.write(&rows).await.map_err(|e| SinkError::JsonParse(e.to_string()))?;
+    //         Ok(())
+    // }
+
+}
+#[derive(ClickHouseRow)]
+struct Rows{
 }
 
