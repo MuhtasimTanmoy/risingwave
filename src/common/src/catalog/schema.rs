@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::ops::Index;
 
+use arrow_schema::Schema as ArrowSchema;
 use itertools::Itertools;
 use risingwave_pb::plan_common::{PbColumnDesc, PbField};
 
@@ -21,7 +23,6 @@ use super::ColumnDesc;
 use crate::array::ArrayBuilderImpl;
 use crate::types::{DataType, StructType};
 use crate::util::iter_util::ZipEqFast;
-
 /// The field in the schema of the executor's return data
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Field {
@@ -197,6 +198,32 @@ impl Schema {
             true
         }
     }
+
+    /// Check if the schema is same as  the iceberg table schema.
+    pub fn same_as_arrow_schema(&self, arrow_schema: &ArrowSchema) -> bool {
+        if self.fields.len() != arrow_schema.fields().len() {
+            return false;
+        }
+        let mut schema_fields = HashMap::new();
+        self.fields.iter().for_each(|field| {
+            let res = schema_fields.insert(&field.name, &field.data_type);
+            // This assert is to make sure there is no duplicate field name in the schema.
+            assert!(res.is_none())
+        });
+
+        arrow_schema.fields().iter().all(|arrow_field| {
+            schema_fields
+                .get(arrow_field.name())
+                .and_then(|data_type| {
+                    if *data_type == &arrow_field.data_type().into() {
+                        Some(())
+                    } else {
+                        None
+                    }
+                })
+                .is_some()
+        })
+    }
 }
 
 impl Field {
@@ -326,5 +353,40 @@ pub mod test_utils {
     /// Create a util schema **for test only** with three decimal fields.
     pub fn ddd() -> Schema {
         decimal_n::<3>()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn test_same_as_arrow_schema() {
+        use arrow_schema::{DataType as ArrowDataType, Field as ArrowField};
+
+        use super::*;
+        let iceberg_schema = Schema::new(vec![
+            Field::with_name(DataType::Int32, "a"),
+            Field::with_name(DataType::Int32, "b"),
+            Field::with_name(DataType::Int32, "c"),
+        ]);
+        let arrow_schema = ArrowSchema::new(vec![
+            ArrowField::new("a", ArrowDataType::Int32, false),
+            ArrowField::new("b", ArrowDataType::Int32, false),
+            ArrowField::new("c", ArrowDataType::Int32, false),
+        ]);
+        assert!(iceberg_schema.same_as_arrow_schema(&arrow_schema));
+
+        let iceberg_schema = Schema::new(vec![
+            Field::with_name(DataType::Int32, "d"),
+            Field::with_name(DataType::Int32, "c"),
+            Field::with_name(DataType::Int32, "a"),
+            Field::with_name(DataType::Int32, "b"),
+        ]);
+        let arrow_schema = ArrowSchema::new(vec![
+            ArrowField::new("a", ArrowDataType::Int32, false),
+            ArrowField::new("b", ArrowDataType::Int32, false),
+            ArrowField::new("d", ArrowDataType::Int32, false),
+            ArrowField::new("c", ArrowDataType::Int32, false),
+        ]);
+        assert!(iceberg_schema.same_as_arrow_schema(&arrow_schema));
     }
 }
