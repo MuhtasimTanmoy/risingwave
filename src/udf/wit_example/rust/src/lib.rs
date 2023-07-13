@@ -20,7 +20,7 @@ wit_bindgen::generate!({
     // optional, since there's only one world. We make it explicit here.
     world: "udf",
     // path is relative to Cargo.toml
-    path:"../wit"
+    path:"../../wit"
 });
 
 // Define a custom type and implement the generated `Udf` trait for it which

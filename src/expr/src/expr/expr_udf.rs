@@ -111,7 +111,12 @@ impl UdfExpression {
             arrow_array::RecordBatch::try_new_with_options(self.arg_schema.clone(), columns, &opts)
                 .expect("failed to build record batch");
         let output: arrow_array::RecordBatch = match &self.imp {
-            UdfImpl::Wasm { component } => component.eval(input)?,
+            UdfImpl::Wasm { component } => {
+                component
+                    .eval(input)
+                    .instrument_await(self.span.clone())
+                    .await?
+            }
             UdfImpl::External { client, identifier } => {
                 client
                     .call(identifier, input)

@@ -1,5 +1,5 @@
 [package]
-name = "wit_example"
+name = "my_udf"
 version = "0.1.0"
 edition = "2021"
 homepage = "https://github.com/risingwavelabs/risingwave"

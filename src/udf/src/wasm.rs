@@ -14,12 +14,13 @@
 
 #![expect(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use itertools::Itertools;
 use risingwave_object_store::object::object_metrics::ObjectStoreMetrics;
 use risingwave_object_store::object::{parse_remote_object_store, ObjectStoreImpl};
+use tokio::sync::Mutex;
 use tracing::debug;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Store};
@@ -28,7 +29,8 @@ pub mod component {
     mod bindgen {
         wasmtime::component::bindgen!({
             world: "udf",
-            path: "wit/udf.wit"
+            path: "wit/udf.wit",
+            async: true // required for wasi
         });
     }
     pub use bindgen::{EvalErrno, RecordBatch as WasmRecordBatch, Schema, Udf};
@@ -37,7 +39,28 @@ pub mod component {
 /// Host state
 ///
 /// Currently this is only a placeholder. No states.
-struct WasmState {}
+struct WasmState {
+    wasi_ctx: wasmtime_wasi::preview2::WasiCtx,
+    table: wasmtime_wasi::preview2::Table,
+}
+
+impl wasmtime_wasi::preview2::WasiView for WasmState {
+    fn table(&self) -> &wasmtime_wasi::preview2::Table {
+        &self.table
+    }
+
+    fn table_mut(&mut self) -> &mut wasmtime_wasi::preview2::Table {
+        &mut self.table
+    }
+
+    fn ctx(&self) -> &wasmtime_wasi::preview2::WasiCtx {
+        &self.wasi_ctx
+    }
+
+    fn ctx_mut(&mut self) -> &mut wasmtime_wasi::preview2::WasiCtx {
+        &mut self.wasi_ctx
+    }
+}
 
 type ArrowResult<T> = std::result::Result<T, arrow_schema::ArrowError>;
 type WasmtimeResult<T> = std::result::Result<T, wasmtime::Error>;
@@ -78,14 +101,19 @@ mod convert {
 }
 
 impl InstantiatedComponent {
-    pub fn eval(&self, input: arrow_array::RecordBatch) -> WasmUdfResult<arrow_array::RecordBatch> {
+    pub async fn eval(
+        &self,
+        input: arrow_array::RecordBatch,
+    ) -> WasmUdfResult<arrow_array::RecordBatch> {
         // let input_schema = self.bindings.call_input_schema(&mut self.store)?;
         // let output_schema = self.bindings.call_output_schema(&mut self.store)?;
 
         let input = to_wasm_batch(input)?;
+        // TODO: Use tokio Mutex to use it across the await here. Does it make sense?
         let result = self
             .bindings
-            .call_eval(&mut *self.store.lock().unwrap(), &input)??;
+            .call_eval(&mut *self.store.lock().await, &input)
+            .await??;
         let result = from_wasm_batch(&result)?;
         let Some((record_batch,))= result.collect_tuple() else {
             return Err(WasmUdfError::Encoding("should return only one record batch in IPC buffer".to_string()));
@@ -108,7 +136,8 @@ impl WasmEngine {
         // Is this expensive?
         let mut config = Config::new();
         config.wasm_component_model(true);
-        config.async_support(false);
+        // required for wasi
+        config.async_support(true);
 
         Self {
             engine: wasmtime::Engine::new(&config).expect("failed to create wasm engine"),
@@ -150,7 +179,7 @@ impl WasmEngine {
         );
 
         // check the component can be instantiated
-        let linker = Linker::new(&self.engine);
+        let mut linker = Linker::new(&self.engine);
         // A Store is intended to be a short-lived object in a program. No form of GC is
         // implemented at this time so once an instance is created within a Store it will not be
         // deallocated until the Store itself is dropped. This makes Store unsuitable for
@@ -158,9 +187,15 @@ impl WasmEngine {
         // memory. It's recommended to have a Store correspond roughly to the lifetime of a
         // "main instance" that an embedding is interested in executing.
 
-        // So this is cheap?
-        let mut store = Store::new(&self.engine, WasmState {});
-        let (_bindings, _instance) = component::Udf::instantiate(&mut store, &component, &linker)?;
+        // So creating a Store is cheap?
+        let mut table = wasmtime_wasi::preview2::Table::new();
+        let wasi_ctx = wasmtime_wasi::preview2::WasiCtxBuilder::new()
+            .inherit_stdio() // this is needed for println to work
+            .build(&mut table)?;
+        let mut store = Store::new(&self.engine, WasmState { table, wasi_ctx });
+        wasmtime_wasi::preview2::wasi::command::add_to_linker(&mut linker)?;
+        let (_bindings, _instance) =
+            component::Udf::instantiate_async(&mut store, &component, &linker).await?;
 
         object_store
             .upload(&compiled_path(identifier), serialized.into())
@@ -189,9 +224,15 @@ impl WasmEngine {
             Component::deserialize(&self.engine, serialized_component)?
         };
 
-        let linker = Linker::new(&self.engine);
-        let mut store = Store::new(&self.engine, WasmState {});
-        let (bindings, instance) = component::Udf::instantiate(&mut store, &component, &linker)?;
+        let mut linker = Linker::new(&self.engine);
+        let mut table = wasmtime_wasi::preview2::Table::new();
+        let wasi_ctx = wasmtime_wasi::preview2::WasiCtxBuilder::new()
+            .inherit_stdio() // this is needed for println to work
+            .build(&mut table)?;
+        let mut store = Store::new(&self.engine, WasmState { table, wasi_ctx });
+        wasmtime_wasi::preview2::wasi::command::add_to_linker(&mut linker)?;
+        let (bindings, instance) =
+            component::Udf::instantiate_async(&mut store, &component, &linker).await?;
 
         Ok(InstantiatedComponent {
             store: Arc::new(Mutex::new(store)),
